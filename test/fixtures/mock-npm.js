@@ -1,5 +1,6 @@
 const os = require('os')
 const fs = require('fs').promises
+const { writeFileSync } = require('fs')
 const path = require('path')
 const tap = require('tap')
 const errorMessage = require('../../lib/utils/error-message')
@@ -56,6 +57,7 @@ const getMockNpm = async (t, { mocks, init, load, npm: npmOpts }) => {
   }
 
   const Npm = tmock(t, '{LIB}/npm.js', {
+    '@npmcli/config/lib/definitions': tmock(t, '@npmcli/config/lib/definitions'),
     '{LIB}/utils/update-notifier.js': async () => {},
     ...mocks,
     ...mock.logMocks,
@@ -96,6 +98,13 @@ const getMockNpm = async (t, { mocks, init, load, npm: npmOpts }) => {
 
   mock.Npm = MockNpm
   if (init) {
+    if (npmOpts.npmRoot) {
+      writeFileSync(
+        path.join(npmOpts.npmRoot, 'package.json'),
+        JSON.stringify({ name: 'npm', version: '1.2.3' }),
+        'utf-8'
+      )
+    }
     mock.npm = new MockNpm(npmOpts)
     if (load) {
       await mock.npm.load()
