@@ -3,12 +3,16 @@ const fs = require('fs').promises
 const { writeFileSync } = require('fs')
 const path = require('path')
 const tap = require('tap')
+const { EnvKeys, ProcessKeys } = require('@npmcli/config')
 const errorMessage = require('../../lib/utils/error-message')
 const mockLogs = require('./mock-logs')
 const mockGlobals = require('@npmcli/mock-globals')
 const tmock = require('./tmock')
 const defExitCode = process.exitCode
+const npmRoot = path.resolve(__dirname, '../../')
 
+// changes to the supplied directory and returns a function
+// to reset at the end of a test
 const changeDir = (dir) => {
   if (dir) {
     const cwd = process.cwd()
@@ -18,6 +22,10 @@ const changeDir = (dir) => {
   return () => {}
 }
 
+// takes the passed in testdir options for the global directory and rewrites
+// the nested depth and any symlinks to match the desired location based on the
+// platform. windows wants everything at `GLOBAL/node_modules` and other platforms
+// want `GLOBAL/lib/node_modules`
 const setGlobalNodeModules = (globalDir) => {
   const updateSymlinks = (obj, visit) => {
     for (const [key, value] of Object.entries(obj)) {
@@ -58,6 +66,9 @@ const getMockNpm = async (t, { mocks, init, load, npm: npmOpts }) => {
 
   const Npm = tmock(t, '{LIB}/npm.js', {
     '@npmcli/config/lib/definitions': tmock(t, '@npmcli/config/lib/definitions'),
+    // update-notifier is designed to not await until its finished
+    // so we always mock it to a sync noop function so tests will
+    // always complete. the actual update notifier is tested separately
     '{LIB}/utils/update-notifier.js': async () => {},
     ...mocks,
     ...mock.logMocks,
@@ -96,7 +107,6 @@ const getMockNpm = async (t, { mocks, init, load, npm: npmOpts }) => {
     }
   }
 
-  mock.Npm = MockNpm
   if (init) {
     if (npmOpts.npmRoot) {
       writeFileSync(
@@ -111,6 +121,7 @@ const getMockNpm = async (t, { mocks, init, load, npm: npmOpts }) => {
     }
   }
 
+  mock.Npm = MockNpm
   return mock
 }
 
@@ -162,13 +173,19 @@ const setupMockNpm = async (t, {
   const npmEnvs = Object.keys(process.env).filter(k => k.startsWith('npm_'))
   mockGlobals(t, {
     process: {
-      title: process.title,
-      execPath: process.execPath,
+      ...ProcessKeys.reduce((acc, k) => {
+        acc[k] = process[k]
+        return acc
+      }, {}),
       env: {
-        NODE_ENV: process.env.NODE_ENV,
-        COLOR: process.env.COLOR,
+        ...EnvKeys.reduce((acc, k) => {
+          // XXX: we could ensure an original value for all these configs if we wanted
+          // to normalize them across all tests and require tests set them explicitly
+          acc[k] = process.env[k]
+          return acc
+        }, {}),
         // further, these are npm controlled envs that we need to zero out before
-        // before the test. setting them to undefined ensures they are not set and
+        // the test. setting them to undefined ensures they are not set and
         // also returned to their original value after the test
         ...npmEnvs.reduce((acc, k) => {
           acc[k] = undefined
@@ -208,7 +225,7 @@ const setupMockNpm = async (t, {
     cache: dirs.cache,
   }
 
-  const { argv, env, config } = Object.entries({ ...defaultConfigs, ...withDirs(_config) })
+  const { argv, env } = Object.entries({ ...defaultConfigs, ...withDirs(_config) })
     .reduce((acc, [key, value]) => {
       // nerfdart configs passed in need to be set via env var instead of argv
       // and quoted with `"` so mock globals will ignore that it contains dots
@@ -224,29 +241,22 @@ const setupMockNpm = async (t, {
 
   const mockedGlobals = mockGlobals(t, {
     'process.env.HOME': dirs.home,
-    // global prefix cannot be (easily) set via argv so this is the easiest way
-    // to set it that also closely mimics the behavior a user would see since it
-    // will already be set while `npm.load()` is being run
-    // Note that this only sets the global prefix and the prefix is set via chdir
+    // global prefix cannot be set via argv without affecting other prefixes so
+    // this is the easiest way to set it that also closely mimics the behavior a
+    // user would see since it will already be set while `npm.load()` is being
+    // run Note that this only sets the global prefix and the prefix is set via
+    // chdir
     'process.env.PREFIX': dirs.globalPrefix,
     ...withDirs(globals),
     ...env,
   })
 
-  const { npm, ...mockNpm } = await getMockNpm(t, {
+  const { npm, Npm, ...mockNpm } = await getMockNpm(t, {
     init,
     load,
     mocks: withDirs(mocks),
-    npm: { argv, excludeNpmCwd: true, ...withDirs(npmOpts) },
+    npm: { argv, npmRoot, localPrefixRoot: dir, ...withDirs(npmOpts) },
   })
-
-  if (config.omit?.includes('prod')) {
-    // XXX(HACK): --omit=prod is not a valid config according to the definitions but
-    // it was being hacked in via flatOptions for older tests so this is to
-    // preserve that behavior and reduce churn in the snapshots. this should be
-    // removed or fixed in the future
-    npm.flatOptions.omit.push('prod')
-  }
 
   t.teardown(() => {
     if (npm) {
@@ -261,7 +271,7 @@ const setupMockNpm = async (t, {
 
   const mockCommand = {}
   if (command) {
-    const Cmd = mockNpm.Npm.cmd(command)
+    const Cmd = Npm.cmd(command)
     if (setCmd) {
       // XXX(hack): This is a hack to allow fake-ish tests to set the currently
       // running npm command without running exec. Generally, we should rely on
@@ -287,6 +297,7 @@ const setupMockNpm = async (t, {
   }
 
   return {
+    Npm,
     npm,
     mockedGlobals,
     ...mockNpm,
