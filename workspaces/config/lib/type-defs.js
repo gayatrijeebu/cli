@@ -4,33 +4,43 @@ const querystring = require('querystring')
 const { resolve } = require('path')
 const { networkInterfaces } = require('os')
 
+// This is set by the config constructor and allows the types
+// to get the internal data from config for use in replacements
+let getData = () => {}
+const setDataFn = (fn) => getData = fn
+
 const typeSymbols = {}
 const typeDefs = {}
-const byType = new Map()
 const Types = {}
+const typesMap = new Map()
 
-const getType = (k) => byType.get(k)
-const updateType = (k, data) => Object.assign(getType(k), data)
+const getTypeBySymbol = (t) => typesMap.get(t)
 
-const type = (key, { type: t, ...typeOpts } = {}) => {
-  const typeKey = t ?? key
-  const typeSymbol = typeSymbols[typeKey] ?? Symbol(typeKey)
-  typeSymbols[typeKey] = typeSymbol
-
-  const typeDef = {
-    type: typeSymbol,
-    ...typeOpts,
+const type = (typeKey, typeOpts = {}) => {
+  let typeSymbol
+  if (typeSymbols[typeKey]) {
+    typeSymbol = typeSymbols[typeKey]
+  } else {
+    typeSymbol = typeSymbols[typeKey] = Symbol(typeKey)
   }
-  typeDefs[key] = typeDef
-  byType.set(typeSymbol, typeDefs[key])
-  Types[key] = typeSymbol
+
+  const typeDef = { type: typeSymbol, ...typeOpts }
+  // this is what gets passed to nopt, the string key is not
+  // used. nopt looks it up based on the type property
+  typeDefs[typeKey] = typeDef
+  // this is exported and used in our defintions. each value
+  // is a symbol that will then be looked up by nopt
+  Types[typeKey] = typeSymbol
+  // this is a map so full type definitions can be looked up
+  // by symbol in the config definition to create usage, etc
+  typesMap.set(typeSymbol, typeDef)
+
   return typeSymbol
 }
 
 const valuesType = (values) => {
   const allNumeric = values.every(v => typeof v === 'number')
   return {
-    type: JSON.stringify(values),
     values,
     validate: (data, k, val) => {
       if (allNumeric) {
@@ -81,9 +91,9 @@ const validatePath = (data, k, val) => {
     return false
   }
 
-  const isWin = typeDefs.Path.PLATFORM === 'win32'
+  const isWin = getData('platform') === 'win32'
   const homePattern = isWin ? /^~(\/|\\)/ : /^~\//
-  const home = typeDefs.Path.HOME
+  const home = getData('home')
 
   if (home && val.match(homePattern)) {
     data[k] = resolve(home, val.slice(2))
@@ -212,7 +222,7 @@ type('Path', {
   description: 'a valid filesystem path',
 })
 
-type('Semver', {
+type('SemVer', {
   validate: (data, k, val) => {
     const valid = semver.valid(val)
     if (!valid) {
@@ -256,7 +266,6 @@ type('BooleanOrNumber', {
 
 type('IpAddress', {
   ...valuesType(getLocalIps()),
-  type: 'IpAddress',
   typeDescription: 'IP Address',
 })
 
@@ -270,14 +279,15 @@ type('Array')
 // not allow certain keys there.
 type('NotAllowed', { validate: () => false })
 
-Types.Values = (...values) => {
-  const t = valuesType(values)
-  return type(t.type, t)
-}
+// this allows for definitions to create ad-hoc type definitions that allow only
+// certain values, with affordances for strings and numbers. like 1,2,3 for
+// lockfile-version can be a string or number but we only want to display help
+// for the coerced value of each allowed value
+Types.Values = (...v) => type(JSON.stringify(v), valuesType(v))
 
 module.exports = {
   typeDefs,
   Types,
-  getType,
-  updateType,
+  getType: getTypeBySymbol,
+  getData: setDataFn,
 }

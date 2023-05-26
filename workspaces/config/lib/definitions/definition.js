@@ -9,8 +9,8 @@
 const { Types, getType } = require('../type-defs')
 const hasOwn = (o, k) => Object.prototype.hasOwnProperty.call(o, k)
 
-// special affordance for ssl -> SSL
-const getFlatKey = (k) => k.replace(/-(ssl|[a-z])/g, (...a) => a[1].toUpperCase())
+// special affordance for ssl -> SSL and tty -> TTY
+const getFlatKey = (k) => k.replace(/-(ssl|tty|[a-z])/g, (...a) => a[1].toUpperCase())
 
 class Derived {
   #get = null
@@ -22,30 +22,16 @@ class Derived {
   }
 
   get sources () {
-    return [...this.#sources.values()]
+    return this.#sources
   }
 
   get flatKey () {
     return this.#flatKey
   }
 
-  constructor (key, { key: defKey, value, get, defSources, nested, sources } = {}) {
+  constructor (key, { get, nested, sources } = {}) {
     this.#flatKey = getFlatKey(key)
-
-    if (defKey) {
-      const defFlatKey = getFlatKey(defKey)
-      this.#get = (d) => d[defFlatKey]
-      if (sources) {
-        throw new Error('Derived configs based on a key cannot have other sources')
-      }
-    } else if (value !== undefined) {
-      this.#get = () => value
-      if (sources) {
-        throw new Error('Derived configs based on a value cannot have other sources')
-      }
-    } else if (typeof get === 'function') {
-      this.#get = get
-    }
+    this.#get = get
 
     if (!this.#get) {
       throw new Error(`Invalid value for derived key ${key} get: ${get}`)
@@ -56,7 +42,10 @@ class Derived {
       this.#get = (...args) => originalFn(...args)[this.#flatKey]
     }
 
-    this.#sources = new Set([key, ...(sources || []), ...defSources])
+    const sourcesSet = new Set([sources])
+    sourcesSet.add(key)
+
+    this.#sources = [...sourcesSet]
   }
 }
 
@@ -87,19 +76,21 @@ class Definition {
       this.#derived.add(key)
     } else if (typeof def.flatten === 'string') {
       this.#derived.add(def.flatten)
-    } else if (
-      Array.isArray(def.flatten) &&
-      def.flatten.every(f => f === true || typeof f === 'string')
-    ) {
+    } else if (Array.isArray(def.flatten) && def.flatten.every(f => typeof f === 'string')) {
       for (const f of def.flatten) {
         this.#derived.add(f)
       }
     } else if (def.flatten) {
-      throw new Error('flatten must be true, a string or an array of those values')
+      throw new Error('flatten must be true, a string or an array of strings')
     }
 
     if (!Array.isArray(this.#def.type)) {
       this.#def.type = [this.#def.type]
+    }
+
+    // if default is not set, then it is null
+    if (!hasOwn(this.#def, 'default')) {
+      this.#def.default = null
     }
 
     // always add null to types if its the default

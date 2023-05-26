@@ -1,45 +1,8 @@
-const definitions = require('./definitions.js')
 
-// use the defined flattening function, and copy over any scoped
-// registries and registry-specific "nerfdart" configs verbatim
-//
-// TODO: make these getters so that we only have to make dirty
-// the thing that changed, and then flatten the fields that
-// could have changed when a config.set is called.
-//
-// TODO: move nerfdart auth stuff into a nested object that
-// is only passed along to paths that end up calling npm-registry-fetch.
-const flatten = (obj, flat = {}) => {
-  for (const [key, val] of Object.entries(obj)) {
-    const def = definitions[key]
-    if (def && def.flatten) {
-      def.flatten(key, obj, flat)
-    } else if (/@.*:registry$/i.test(key) || /^\/\//.test(key)) {
-      flat[key] = val
-    }
-  }
-
-  // XXX make this the bin/npm-cli.js file explicitly instead
-  // otherwise using npm programmatically is a bit of a pain.
-  flat.npmBin = require.main ? require.main.filename
-    : /* istanbul ignore next - not configurable property */ undefined
-  flat.nodeBin = process.env.NODE || process.execPath
-
-  // XXX should this be sha512?  is it even relevant?
-  flat.hashAlgorithm = 'sha1'
-
-  return flat
-}
-
-const definitionProps = Object.entries(definitions)
-  .reduce((acc, [key, { short = [], default: d }]) => {
-  // can be either an array or string
-    for (const s of [].concat(short)) {
-      acc.shorthands[s] = [`--${key}`]
-    }
-    acc.defaults[key] = d
-    return acc
-  }, { shorthands: {}, defaults: {} })
+const { definitions, definitionKeys } = require('./definitions')
+const { derived, derivedKeys, internal, internalKeys } = require('./derived')
+const { Types } = require('../type-defs')
+const { LocationEntries, Locations } = require('./locations')
 
 // aliases where they get expanded into a completely different thing
 // these are NOT supported in the environment or npmrc files, only
@@ -64,13 +27,103 @@ const shorthands = {
   porcelain: ['--parseable'],
   readonly: ['--read-only'],
   reg: ['--registry'],
-  iwr: ['--include-workspace-root'],
-  ...definitionProps.shorthands,
 }
 
-module.exports = {
-  defaults: definitionProps.defaults,
+// These are the configs that we can nerf-dart. Not all of them currently even
+// *have* config definitions so we have to explicitly validate them here
+const nerfDarts = [
+  '_auth',
+  '_authToken',
+  'username',
+  '_password',
+  'email',
+  'certfile',
+  'keyfile',
+]
+
+const E = module.exports = {
+  nerfDarts,
+  // definition instances and their keys
   definitions,
-  flatten,
+  definitionKeys,
+  // internal
+  internal,
+  internalKeys,
+  // shorthands
   shorthands,
+  shorthandKeys: Object.keys(shorthands),
+  // derived instances and their keys
+  derived,
+  derivedKeys,
+  // type data and default values collected
+  // from definitions since we need this info often
+  // in object form
+  defaults: {},
+  types: {},
 }
+
+const setDefine = (key, def) => {
+  E.defaults[key] = def.default
+
+  for (const [where] of LocationEntries) {
+    // a type is allowed for each location if the definition didnt specify any
+    // locations, or if the location is default or if this is one of the definitions
+    // valid locations. anything else gets set to a special type that will not allow
+    // any value
+    const allowed =
+      !def.location.length ||
+      def.location.includes(where) ||
+      [Locations.default, Locations.builtin].includes(where)
+    E.types[where][key] = allowed ? def.type : [Types.NotAllowed]
+  }
+
+  for (const s of def.short) {
+    E.shorthands[s] = [`--${key}`]
+    E.shortKeys.push(s)
+  }
+}
+
+const setInternal = (key, v) => {
+  // E.internal[key] = v
+  // E.internalKeys.push(key)
+}
+
+const setDerive = (keys, der) => {
+
+}
+
+const main = () => {
+  for (const [where] of LocationEntries) {
+    E.types[where] = {}
+  }
+
+  for (const key of definitionKeys) {
+    setDefine(key, definitions[key])
+  }
+
+  // Everything needs to be added before derived values are created
+  Object.freeze(E.definitions)
+  Object.freeze(E.definitionKeys)
+  Object.freeze(E.defaults)
+  Object.freeze(E.types)
+  Object.freeze(E.shorthands)
+  Object.freeze(E.shortKeys)
+
+  for (const key of internalKeys) {
+    setInternal(key, internal[key])
+  }
+
+  Object.freeze(E.internal)
+  Object.freeze(E.internalKeys)
+
+  for (const [key, derivedOpts] of derived.entries()) {
+    setDerive(key, ...derivedOpts)
+  }
+
+  // graph it
+
+  Object.freeze(E.derived)
+  Object.freeze(E.derivedKeys)
+}
+
+main()

@@ -1,6 +1,7 @@
 const ciInfo = require('ci-info')
 const { Types } = require('../type-defs')
 const { Locations } = require('./locations')
+const { Definition } = require('./definition.js')
 
 const {
   EDITOR,
@@ -27,14 +28,17 @@ const Cache = `${CacheRoot}/${isWindows ? 'npm-cache' : '.npm'}`
 
 const CiName = ciInfo.name ? ciInfo.name.toLowerCase().split(' ').join('-') : null
 
-const definitions = {}
-module.exports = definitions
-const define = (key, v) => module.exports[key] = v
+const E = module.exports = {
+  definitions: {},
+  definitionKeys: [],
+}
+const define = (key, v) => {
+  E.definitions[key] = new Definition(key, v)
+  E.definitionKeys.push(key)
+}
 
 // Define all config keys we know about
-
 define('_auth', {
-  default: null,
   type: Types.String,
   description: `
     A basic-auth string to use when authenticating against the npm registry.
@@ -49,7 +53,6 @@ define('_auth', {
 })
 
 define('access', {
-  default: null,
   type: ['restricted', 'public'],
   defaultDescription: `
     'public' for new packages, existing packages it will not change the current level
@@ -91,7 +94,6 @@ define('allow-same-version', {
 })
 
 define('also', {
-  default: null,
   type: ['dev', 'development'],
   description: `
     When set to \`dev\` or \`development\`, this is an alias for
@@ -113,7 +115,6 @@ define('audit', {
 })
 
 define('audit-level', {
-  default: null,
   type: ['info', 'low', 'moderate', 'high', 'critical', 'none'],
   description: `
     The minimum level of vulnerability for \`npm audit\` to exit with
@@ -133,7 +134,6 @@ define('auth-type', {
 })
 
 define('before', {
-  default: null,
   type: Types.Date,
   description: `
     If passed to \`npm install\`, will rebuild the npm tree such that only
@@ -164,7 +164,6 @@ define('bin-links', {
 })
 
 define('browser', {
-  default: null,
   type: Types.BooleanOrString,
   defaultDescription: `
     OS X: \`"open"\`, Windows: \`"start"\`, Others: \`"xdg-open"\`
@@ -181,7 +180,6 @@ define('browser', {
 })
 
 define('ca', {
-  default: null,
   type: [Types.String, Types.Array],
   description: `
     The Certificate Authority signing certificate that is trusted for SSL
@@ -242,7 +240,6 @@ define('cache-min', {
 })
 
 define('cafile', {
-  default: null,
   type: Types.Path,
   description: `
     A path to a file containing one or multiple Certificate Authority signing
@@ -267,7 +264,6 @@ define('call', {
 })
 
 define('cert', {
-  default: null,
   type: Types.String,
   description: `
     A client certificate to pass when accessing the registry.  Values should
@@ -310,7 +306,6 @@ define('ci-name', {
 })
 
 define('cidr', {
-  default: null,
   type: [Types.String, Types.Array],
   description: `
     This is a list of CIDR address to be used when configuring limited access
@@ -341,7 +336,6 @@ define('commit-hooks', {
 })
 
 define('depth', {
-  default: null,
   type: Types.Number,
   defaultDescription: `
     \`Infinity\` if \`--all\` is set, otherwise \`1\`
@@ -652,7 +646,6 @@ define('global', {
 })
 
 define('globalconfig', {
-  default: null,
   type: Types.Path,
   defaultDescription: `
     The global --prefix setting plus 'etc/npmrc'. For example,
@@ -687,7 +680,6 @@ define('heading', {
 })
 
 define('https-proxy', {
-  default: null,
   type: Types.URL,
   description: `
     A proxy to use for outgoing https requests. If the \`HTTPS_PROXY\` or
@@ -814,7 +806,7 @@ define('init-module', {
 
 define('init-version', {
   default: '1.0.0',
-  type: Types.Semver,
+  type: Types.SemVer,
   description: `
     The value that \`npm init\` should use by default for the package
     version number, if not already set in package.json.
@@ -879,7 +871,7 @@ define('init.module', {
 
 define('init.version', {
   default: '1.0.0',
-  type: Types.Semver,
+  type: Types.SemVer,
   deprecated: `
     Use \`--init-version\` instead.
   `,
@@ -929,7 +921,6 @@ define('json', {
 })
 
 define('key', {
-  default: null,
   type: Types.String,
   description: `
     A client key to pass when accessing the registry.  Values should be in
@@ -998,7 +989,6 @@ define('link', {
 })
 
 define('local-address', {
-  default: null,
   type: Types.IpAddress,
   description: `
     The IP address of the local interface to use when making connections to
@@ -1033,7 +1023,6 @@ define('location', {
 })
 
 define('lockfile-version', {
-  default: null,
   type: Types.Values(1, 2, 3),
   defaultDescription: `
     Version 3 if no lockfile, auto-converting v1 lockfiles to v3, otherwise
@@ -1083,7 +1072,6 @@ define('loglevel', {
 })
 
 define('logs-dir', {
-  default: null,
   type: Types.Path,
   defaultDescription: `
     A directory named \`_logs\` inside the cache
@@ -1136,7 +1124,6 @@ define('message', {
 })
 
 define('node-options', {
-  default: null,
   type: Types.String,
   description: `
     Options to pass through to Node.js via the \`NODE_OPTIONS\` environment
@@ -1205,7 +1192,6 @@ define('omit-lockfile-registry-resolved', {
 })
 
 define('only', {
-  default: null,
   type: ['prod', 'production'],
   deprecated: `
     Use \`--omit=dev\` to omit dev dependencies from the install.
@@ -1217,7 +1203,6 @@ define('only', {
 })
 
 define('optional', {
-  default: null,
   type: Types.Boolean,
   deprecated: `
     Use \`--omit=optional\` to exclude optional dependencies, or
@@ -1231,7 +1216,6 @@ define('optional', {
 })
 
 define('otp', {
-  default: null,
   type: Types.String,
   description: `
     This is a one-time password from a two-factor authenticator.  It's needed
@@ -1328,7 +1312,6 @@ define('prefer-online', {
 })
 
 define('prefix', {
-  default: null,
   type: Types.Path,
   short: 'C',
   defaultDescription: `
@@ -1354,7 +1337,6 @@ define('preid', {
 })
 
 define('production', {
-  default: null,
   type: Types.Boolean,
   deprecated: 'Use `--omit=dev` instead.',
   description: 'Alias for `--omit=dev`',
@@ -1387,7 +1369,6 @@ define('provenance', {
 })
 
 define('provenance-file', {
-  default: null,
   type: Types.Path,
   hint: '<file>',
   exclusive: ['provenance'],
@@ -1398,7 +1379,6 @@ define('provenance-file', {
 })
 
 define('proxy', {
-  default: null,
   type: [false, Types.URL], // allow proxy to be disabled explicitly
   description: `
     A proxy to use for outgoing http requests. If the \`HTTP_PROXY\` or
@@ -1592,7 +1572,6 @@ define('scope', {
 })
 
 define('script-shell', {
-  default: null,
   type: Types.String,
   defaultDescription: `
     '/bin/sh' on POSIX systems, 'cmd.exe' on Windows
@@ -1663,7 +1642,6 @@ define('shrinkwrap', {
   description: `
     Alias for --package-lock
   `,
-  // TODO: is this ok?
   flatten: 'package-lock',
 })
 
@@ -1902,7 +1880,6 @@ define('viewer', {
 })
 
 define('which', {
-  default: null,
   type: Types.PositiveInteger,
   description: `
     If there are multiple funding sources, which 1-indexed source URL to open.
@@ -1934,7 +1911,6 @@ define('workspace', {
 })
 
 define('workspaces', {
-  default: null,
   type: Types.Boolean,
   short: 'ws',
   envExport: false,
@@ -1965,7 +1941,6 @@ define('workspaces-update', {
 })
 
 define('yes', {
-  default: null,
   type: Types.Boolean,
   short: 'y',
   description: `

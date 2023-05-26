@@ -14,20 +14,7 @@ const ConfigData = require('./config-data')
 const Definitions = require('./definitions')
 const nerfDart = require('./nerf-dart.js')
 const replaceInfo = require('./replace-info')
-
-const Locations = Definitions.Locations
-
-// These are the configs that we can nerf-dart. Not all of them currently even
-// *have* config definitions so we have to explicitly validate them here
-const NerfDarts = [
-  '_auth',
-  '_authToken',
-  'username',
-  '_password',
-  'email',
-  'certfile',
-  'keyfile',
-]
+const { Locations } = require('./definlocations')
 
 const fileExists = (...p) => fs.stat(resolve(...p))
   .then((st) => st.isFile())
@@ -38,29 +25,14 @@ const dirExists = (...p) => fs.stat(resolve(...p))
   .catch(() => false)
 
 class Config {
-  static Locations = Locations
-  static ConfigData = ConfigData
-  static EnvKeys = [...SetGlobal.EnvKeys.values()]
-  static ProcessKeys = [...SetGlobal.ProcessKeys.values()]
-  static NerfDarts = NerfDarts
-  static replaceInfo = replaceInfo
-  static definitionKeys = Definitions.definitionKeys
-  static definitions = Definitions.definitions
-  static shortKeys = Definitions.shortKeys
-  static shorthands = Definitions.shorthands
-
   // required options in constructor
   #builtinRoot = null
   #argv = null
   #localPrefixRoot = null
 
+  // references to globals
   #process = null
-  #platform = null
-  #execPath = null
-  #npmExecPath = null
-  #cwd = null
   #env = null
-  #home = null
 
   // set during init which is called in ctor
   #clean = null
@@ -68,14 +40,13 @@ class Config {
 
   // set when we load configs
   #loaded = false
-  #localPackage = null
-  #defaultGlobalPrefix = null
-  #defaultLocalPrefix = null
+  #bailout = null
 
   // functions
   #setEnv = null
   #setNpmEnv = null
   #setProcess = null
+  #credentials = null
 
   // state
   #configData = null
@@ -93,19 +64,22 @@ class Config {
     // of them are allowed public access if they are needed in the derived
     // property getters
     this.#process = process
-    this.#platform = process.platform
-    this.#execPath = process.execPath
-    this.#npmExecPath = require.main?.filename
-    this.#cwd = process.cwd()
-    this.#env = process.env
-    this.#home = process.env.HOME || homedir()
+    this.#env = this.#process.env
+
+    this.#setInternal('node-version', this.#process.version)
+    this.#setInternal('platform', this.#process.platform)
+    this.#setInternal('arch', this.#process.arch)
+    this.#setInternal('exec-path', this.#process.execPath)
+    this.#setInternal('npm-exec-path', require.main?.filename)
+    this.#setInternal('cwd', this.#process.cwd())
+    this.#setInternal('home', this.#env.HOME || homedir())
+    this.#setInternal('dumb-term', this.#env.TERM === 'dumb')
+    this.#setInternal('stderr-tty', !!this.#process.stderr.isTTY)
+    this.#setInternal('stderr-tty', !!this.#process.stdout.isTTY)
 
     // this allows the Path type definition to do replacements
     // using the detected home and platform
-    Definitions.updateType(Definitions.Types.Path, {
-      HOME: this.#home,
-      PLATFORM: this.#platform,
-    })
+    Definitions.getData((k) => this.#getInternal(k))
 
     this.#configData = new ConfigTypes({
       envReplace: (k) => SetGlobal.replaceEnv(this.#env, k),
@@ -114,7 +88,7 @@ class Config {
 
     try {
       const { version } = require(join(this.#builtinRoot, 'package.json'))
-      this.#set('npm-version', version)
+      this.#setInternal('npm-version', version)
     } catch {
       // in some weird state where the passed in npmPath does not have a package.json
       // this will never happen in npm, but is guarded here in case this is consumed
@@ -126,13 +100,19 @@ class Config {
     this.#setNpmEnv = (...args) => SetGlobal.npm.setEnv(this.#env, ...args)
     this.#setProcess = (...args) => SetGlobal.setProcess(this.#process, ...args)
 
+    this.#credentials = {
+      setByURI: (uri) => this.#setByURI(uri),
+      getByURI: (uri) => this.#getByURI(uri),
+      clearByURI: (uri) => this.#clearByURI(uri),
+    }
+
     // load env first because it has no dependencies
     this.#loadEnv()
 
     // then load the cli options since those have no dependencies but can have env
     // vars replaced in them. this gives us the command name and any remaining args
     // which will be passed to npm.exec().
-    this.#loadCli()
+    this.#bailout = this.#loadCli()
   }
 
   // =============================================
@@ -144,36 +124,24 @@ class Config {
     return this.#loaded
   }
 
-  get cwd () {
-    return this.#cwd
-  }
-
   get globalPrefix () {
     return this.#get('global-prefix')
-  }
-
-  get defaultGlobalPrefix () {
-    return this.#defaultGlobalPrefix
   }
 
   get localPrefix () {
     return this.#get('local-prefix')
   }
 
-  get defaultLocalPrefix () {
-    return this.#defaultLocalPrefix
-  }
-
   get localPackage () {
-    return this.#localPackage
+    return this.#getInternal('local-package')
   }
 
-  get execPath () {
-    return this.#execPath
+  get command () {
+    return this.#getInternal('npm-command')
   }
 
-  get npmExecPath () {
-    return this.#npmExecPath
+  get args () {
+    return this.#getInternal('npm-args')
   }
 
   get flat () {
@@ -182,6 +150,10 @@ class Config {
 
   get data () {
     return this.#configData
+  }
+
+  get bailout () {
+    return this.#bailout
   }
 
   get valid () {
@@ -194,19 +166,7 @@ class Config {
   }
 
   get credentials () {
-    return {
-      setByURI: (uri) => this.#setByURI(uri),
-      getByURI: (uri) => this.#getByURI(uri),
-      clearByURI: (uri) => this.#clearByURI(uri),
-    }
-  }
-
-  get command () {
-    return this.#get('npm-command')
-  }
-
-  get args () {
-    return this.#get('npm-args')
+    return this.#credentials
   }
 
   get clean () {
@@ -260,6 +220,10 @@ class Config {
     return this.#configData.getData(where, key)
   }
 
+  #getInternal (key) {
+    return this.#get(key, Locations.internal)
+  }
+
   set (key, val, where) {
     this.#assertLoaded()
     return this.#set(key, val, where)
@@ -267,6 +231,10 @@ class Config {
 
   #set (key, val, where = Locations.cli) {
     return this.#configData.setData(where, key, val)
+  }
+
+  #setInternal (key, value) {
+    return this.#set(key, value, Locations.internal)
   }
 
   delete (key, where) {
@@ -292,7 +260,6 @@ class Config {
   //
   // =============================================
   #loadEnv () {
-    console.log(this.#env)
     const data = Object.entries(this.#env).reduce((acc, [key, val]) => {
       if (!SetGlobal.npm.testKey(key) || !val) {
         return acc
@@ -308,7 +275,6 @@ class Config {
       return acc
     }, {})
     log.silly('config:env', data)
-    console.log(data)
     this.#loadObject(Locations.env, data)
   }
 
@@ -317,26 +283,36 @@ class Config {
     // command name, the remaining args, and config values from the CLI and can rewrite
     // them or parse the remaining config files with this information.
     const { argv: { remain, cooked } } = this.#loadObject(Locations.cli, this.#argv.slice(2))
-    this.#configData.get(Locations.cli).loadObject({ ...Definitions.values })
+    this.#configData.get(Locations.cli).loadObject({ ...Definitions.internal })
 
     let command = remain[0]
-    let args = remain.slice(1)
+    let positionals = remain.slice(1)
 
-    if (this.#get('versions', Locations.cli) || this.#get('version', Locations.cli)) {
-      // npm --versions or npm --version both run the version command
+    if (this.#get('version', Locations.cli)) {
+      // npm --version is a special case that bails out of all other execing
+      // the version is returned from this method and then lib/npm will
+      // output it without trying anything else. this helps make npm --version
+      // faster since it is often used in shell prompts
+      return this.#getInternal('npm-version')
+    }
+
+    if (this.#get('versions', Locations.cli)) {
+      // npm --versions always runs the version command with usage off regardless of other config
       command = 'version'
-      args = []
+      positionals = []
       this.#set('usage', false, Locations.cli)
-    } else if (!command) {
+    }
+
+    if (!command) {
       // if there is no command, then we run the basic help command which print usage
       // but its an error so we need to set the exit code too
       command = 'help'
-      args = []
+      positionals = []
       process.exitCode = 1
     }
 
-    this.#set('npm-command', command, Locations.cli)
-    this.#set('npm-args', args, Locations.cli)
+    this.#setInternal('npm-command', command)
+    this.#setInternal('npm-args', positionals)
 
     // Secrets are mostly in configs, so title is set using only the positional args
     // to keep those from being leaked.
@@ -415,7 +391,7 @@ class Config {
 
     const { localPrefix } = this
 
-    if (this.#defaultLocalPrefix.workspace === localPrefix) {
+    if (this.#get('default-local-prefix-workspace') === localPrefix) {
       // set the workspace in the default layer, which allows it to be overridden easily
       this.#set('workspace', [localPrefix], Locations.default)
       if (await fileExists(localPrefix, '.npmrc')) {
@@ -423,7 +399,7 @@ class Config {
       }
     }
 
-    this.#localPackage = await fileExists(localPrefix, 'package.json')
+    this.#setInternal('local-package', await fileExists(localPrefix, 'package.json'))
 
     const config = this.#configData.get(Locations.project)
 
@@ -462,9 +438,9 @@ class Config {
     await this.#time('whichnode', async () => {
       const node = await which(this.#argv[0]).catch(() => {})
       console.log(node)
-      if (node?.toUpperCase() !== this.#execPath.toUpperCase()) {
+      if (node?.toUpperCase() !== this.#getInternal('exec-path').toUpperCase()) {
         log.verbose('config', 'node symlink', node)
-        this.#execPath = node
+        this.#setInternal('exec-path', node)
         this.#setProcess('execPath', node)
       }
     })
@@ -472,27 +448,25 @@ class Config {
     let prefix
     if (this.#env.PREFIX) {
       prefix = this.#env.PREFIX
-    } else if (this.#platform === 'win32') {
+    } else if (this.#getInternal('platform') === 'win32') {
       // c:\node\node.exe --> prefix=c:\node\
-      prefix = dirname(this.#execPath)
+      prefix = dirname(this.#getInternal('exec-path'))
     } else {
       // /usr/local/bin/node --> prefix=/usr/local
-      prefix = dirname(dirname(this.#execPath))
+      prefix = dirname(dirname(this.#getInternal('exec-path')))
       // destdir only is respected on Unix
       if (this.#env.DESTDIR) {
         prefix = join(this.#env.DESTDIR, prefix)
       }
     }
 
-    console.log(prefix, this.#execPath)
-
-    this.#defaultGlobalPrefix = prefix
+    this.#setInternal('default-global-prefix', prefix)
   }
 
   async #findLocalPrefix () {
     const prefix = { root: null, workspace: null }
 
-    for (const p of walkUp(this.#cwd)) {
+    for (const p of walkUp(this.#getInternal('cwd'))) {
       const hasPackageJson = await fileExists(p, 'package.json')
 
       if (!prefix.root && (hasPackageJson || await dirExists(p, 'node_modules'))) {
@@ -526,7 +500,8 @@ class Config {
       }
     }
 
-    this.#defaultLocalPrefix = prefix
+    this.#setInternal('default-local-prefix-root', prefix.root)
+    this.#setInternal('default-local-prefix-workspace', prefix.workspace)
   }
 
   // Set environment variables for any non-default configs,
@@ -585,10 +560,10 @@ class Config {
     this.#setEnv('npm_execpath', this.#get('npm-bin') ?? null)
 
     // also set some other common nice envs that we want to rely on
-    this.#setEnv('INIT_CWD', this.#cwd)
-    this.#setEnv('HOME', this.#home)
-    this.#setEnv('NODE', this.#execPath)
-    this.#setEnv('npm_node_execpath', this.#execPath)
+    this.#setEnv('INIT_CWD', this.#getInternal('cwd'))
+    this.#setEnv('HOME', this.#getInternal('home'))
+    this.#setEnv('NODE', this.#getInternal('exec-path'))
+    this.#setEnv('npm_node_execpath', this.#getInternal('exec-path'))
     this.#setEnv('npm_command', this.command)
     this.#setEnv('EDITOR', cliConf.get('editor') ?? null)
     // note: this doesn't afect the *current* node process, of course, since
@@ -814,4 +789,10 @@ class Config {
   }
 }
 
-module.exports = Config
+module.exports = {
+  Config,
+  Locations,
+  ConfigData,
+  EnvKeys: [...SetGlobal.EnvKeys.values()],
+  ProcessKeys: [...SetGlobal.ProcessKeys.values()],
+}
