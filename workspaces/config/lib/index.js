@@ -77,15 +77,6 @@ class Config {
     this.#setInternal('stderr-tty', !!this.#process.stderr.isTTY)
     this.#setInternal('stderr-tty', !!this.#process.stdout.isTTY)
 
-    // this allows the Path type definition to do replacements
-    // using the detected home and platform
-    Definitions.getData((k) => this.#getInternal(k))
-
-    this.#configData = new ConfigTypes({
-      envReplace: (k) => SetGlobal.replaceEnv(this.#env, k),
-      config: this,
-    })
-
     try {
       const { version } = require(join(this.#builtinRoot, 'package.json'))
       this.#setInternal('npm-version', version)
@@ -94,6 +85,15 @@ class Config {
       // this will never happen in npm, but is guarded here in case this is consumed
       // in other ways + tests
     }
+
+    // this allows the Path type definition to do replacements
+    // using the detected home and platform
+    Definitions.getData((k) => this.#getInternal(k))
+
+    this.#configData = new ConfigTypes({
+      envReplace: (k) => SetGlobal.replaceEnv(this.#env, k),
+      config: this,
+    })
 
     // bind some private helper functions to the process and env
     this.#setEnv = (...args) => SetGlobal.setEnv(this.#env, ...args)
@@ -670,7 +670,7 @@ class Config {
         this.#set('email', email)
       }
     }
-    for (const k of NerfDarts) {
+    for (const k of Definitions.nerfDarts) {
       this.#delete(`${nerfed}:${k}`)
     }
   }

@@ -2,6 +2,7 @@ const ciInfo = require('ci-info')
 const { Types } = require('../type-defs')
 const { Locations } = require('./locations')
 const { Definition } = require('./definition.js')
+const { resolve } = require('npm-package-arg')
 
 const {
   EDITOR,
@@ -36,6 +37,137 @@ const define = (key, v) => {
   E.definitions[key] = new Definition(key, v)
   E.definitionKeys.push(key)
 }
+const internal = (key, v) => {
+  E.definitions[key] = new Definition(key, v)
+  E.definitionKeys.push(key)
+}
+const derive = (key, v) => {
+  E.definitions[key] = new Definition(key, v)
+  E.definitionKeys.push(key)
+}
+
+internal('npm-command', {
+  type: Types.String,
+})
+
+internal('npm-args', {
+  default: [],
+  type: [Types.String, Types.Array],
+})
+
+internal('npm-version', {
+  type: Types.String,
+})
+
+internal('npm-bin', {
+  type: Types.String,
+})
+
+internal('npm-exec-path', {
+  type: Types.String,
+})
+
+internal('node-version', {
+  type: Types.String,
+})
+
+internal('node-bin', {
+  type: Types.String,
+})
+
+internal('platform', {
+  type: Types.String,
+})
+
+internal('arch', {
+  type: Types.String,
+})
+
+internal('stderr-tty', {
+  type: Types.Boolean,
+})
+
+internal('stdout-tty', {
+  type: Types.Boolean,
+})
+
+internal('dumb-term', {
+  type: Types.Boolean,
+})
+
+internal('exec-path', {
+  type: Types.String,
+})
+
+internal('cwd', {
+  type: Types.String,
+})
+
+internal('home', {
+  type: Types.String,
+})
+
+internal('default-global-prefix', {
+  type: Types.String,
+})
+
+internal('default-local-prefix-workspace', {
+  type: Types.String,
+})
+
+internal('default-local-prefix-root', {
+  type: Types.String,
+})
+
+internal('local-package', {
+  type: Types.Boolean,
+})
+
+// XXX should this be sha512?  is it even relevant?
+internal('hash-algorithm', {
+  default: 'sha1',
+  type: Types.String,
+})
+
+// DERIVED
+derive('local-prefix', {
+  type: Types.Path,
+  depends: [
+    'prefix',
+    'workspaces',
+    'global',
+    'default-local-prefix-root',
+    'default-local-prefix-workspace',
+    'cwd',
+  ],
+  flatten: ({
+    prefix,
+    workspaces,
+    global,
+    defaultLocalPrefixRoot,
+    defaultLocalPrefixWorkspace,
+    cwd,
+  }) => {
+    if (prefix != null) {
+      return prefix
+    }
+
+    const defaultPrefix = defaultLocalPrefixRoot ?? cwd
+
+    if (defaultLocalPrefixRoot && (workspaces === false || global)) {
+      return defaultPrefix
+    }
+
+    return defaultLocalPrefixWorkspace ?? defaultPrefix
+  },
+})
+
+derive('global-prefix', {
+  type: Types.Path,
+  flatten: ({ prefix, defaultGlobalPrefix }) => {
+    return prefix ?? defaultGlobalPrefix
+  },
+})
 
 // Define all config keys we know about
 define('_auth', {
@@ -643,7 +775,22 @@ define('global', {
     * bin files are linked to \`{prefix}/bin\`
     * man pages are linked to \`{prefix}/share/man\`
   `,
+  depends: ['location'],
+  flatten: ({ global, location }) => {
+    return location === 'global' || global
+  },
 })
+
+derive(['prefix', 'globalconfig', 'global-prefix'],
+  ({ prefix, globalconfig, defaultGlobalPrefix }) => {
+    const defaultPrefix = prefix ?? defaultGlobalPrefix
+
+    return {
+      prefix: defaultPrefix,
+      globalPrefix: defaultPrefix,
+      globalconfig: globalconfig ?? resolve(defaultPrefix, 'etc/npmrc'),
+    }
+  }, ['default-global-prefix'])
 
 define('globalconfig', {
   type: Types.Path,
@@ -654,7 +801,14 @@ define('globalconfig', {
   description: `
     The config file to read for global config options.
   `,
-  flatten: true,
+  depends: ['prefix', 'default-global-prefix'],
+  flatten: ({ globalconfig, prefix, defaultGlobalPrefix }) => {
+    // if the prefix is set on cli, env, or userconfig, then we need to
+    // default the globalconfig file to that location, instead of the default
+    // global prefix.  It's weird that `npm get globalconfig --prefix=/foo`
+    // returns `/foo/etc/npmrc`, but better to not change it at this point.
+    return globalconfig ?? resolve(prefix ?? defaultGlobalPrefix, 'etc/npmrc')
+  },
 })
 
 define('global-style', {
@@ -1020,6 +1174,10 @@ define('location', {
     * bin files are linked to \`{prefix}/bin\`
     * man pages are linked to \`{prefix}/share/man\`
   `,
+  depends: ['global'],
+  flatten: ({ global, location }) => {
+    return global ? 'global' : location
+  },
 })
 
 define('lockfile-version', {
@@ -1323,6 +1481,10 @@ define('prefix', {
     The location to install global items.  If set on the command line, then
     it forces non-global commands to run in the specified folder.
   `,
+  depends: ['default-global-prefix'],
+  flatten: ({ prefix, defaultGlobalPrefix }) => {
+    return prefix ?? defaultGlobalPrefix
+  },
 })
 
 define('preid', {

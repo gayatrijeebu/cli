@@ -5,8 +5,8 @@ const {
   definitionKeys,
   derived,
   derivedKeys,
-  valueKeys,
   values,
+  internalKeys,
   LocationEntries,
 } = require('./definitions')
 
@@ -21,12 +21,10 @@ const cacheDescriptor = ({ key, cache }, getValue) => ({
   configurable: false,
   enumerable: true,
   get: () => {
-    if (cache.has(key)) {
-      return cache.get(key)
+    if (!cache.has(key)) {
+      cache.set(key, getValue())
     }
-    const value = getValue()
-    cache.set(key, value)
-    return value
+    return cache.get(key)
   },
 })
 
@@ -62,8 +60,8 @@ class ConfigLocations extends Map {
       this.#createBaseDescriptor(key)
     }
 
-    for (const key of valueKeys) {
-      this.#createValueDescriptor(key)
+    for (const key of internalKeys) {
+      this.#createBaseDescriptor(key)
     }
 
     for (const key of derivedKeys) {

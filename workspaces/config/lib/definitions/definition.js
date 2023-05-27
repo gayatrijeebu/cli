@@ -7,6 +7,8 @@
 // version resolution" etc.
 
 const { Types, getType } = require('../type-defs')
+const { Locations } = require('./locations')
+
 const hasOwn = (o, k) => Object.prototype.hasOwnProperty.call(o, k)
 
 // special affordance for ssl -> SSL and tty -> TTY
@@ -159,6 +161,15 @@ class Definition {
     return !this.#def.exclusive
       ? ''
       : `\nThis config can not be used with: \`${this.#def.exclusive.join('`, `')}\``
+  }
+
+  isAllowed (where) {
+    // a type is allowed for each location if the definition didnt specify any
+    // locations, or if the location is default or if this is one of the definitions
+    // valid locations
+    return !this.location.length ||
+      this.location.includes(where) ||
+      [Locations.default, Locations.builtin].includes(where)
   }
 
   addDerived (...keys) {

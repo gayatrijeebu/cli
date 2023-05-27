@@ -28,13 +28,11 @@ const derive = (keys, get, sources = []) => {
   const keysArr = [].concat(keys)
 
   for (const key of keysArr) {
-    const derivedDef = new Derived(key, {
+    E.derived[key] = new Derived(key, {
       get,
       nested,
       sources: keysArr.concat(sources),
     })
-
-    E.derived[key] = derivedDef
     E.derivedKeys.push(key)
   }
 }
@@ -43,53 +41,7 @@ const internal = (key, value = null) => {
   E.internalKeys.push(key)
 }
 
-internal('npm-command')
-internal('npm-args', [])
-internal('npm-version')
-internal('npm-bin')
-internal('npm-exec-path')
 
-internal('node-version')
-internal('node-bin')
-internal('platform')
-internal('arch')
-internal('stderr-tty')
-internal('stdout-tty')
-internal('dumb-term')
-
-internal('exec-path')
-internal('cwd')
-internal('home')
-
-internal('default-global-prefix')
-internal('default-local-prefix-workspace')
-internal('default-local-prefix-root')
-internal('local-package')
-
-// XXX should this be sha512?  is it even relevant?
-internal('hash-algorithm', 'sha1')
-
-// These two configs are always tied to together so they are derived like this
-// otherwise their dependency relationship would create a cycle which is not
-// currently allowed in the config parser
-derive(['global', 'location'], ({ global, location }) => {
-  const isGlobal = global || location === 'global'
-  return isGlobal ? { global: true, location: 'global' } : { global, location }
-})
-
-derive(['prefix', 'globalconfig', 'global-prefix'],
-  ({ prefix, globalconfig, defaultGlobalPrefix }) => {
-    const defaultPrefix = prefix ?? defaultGlobalPrefix
-    // if the prefix is set on cli, env, or userconfig, then we need to
-    // default the globalconfig file to that location, instead of the default
-    // global prefix.  It's weird that `npm get globalconfig --prefix=/foo`
-    // returns `/foo/etc/npmrc`, but better to not change it at this point.
-    return {
-      prefix: defaultPrefix,
-      globalPrefix: defaultPrefix,
-      globalconfig: globalconfig ?? resolve(defaultPrefix, 'etc/npmrc'),
-    }
-  }, ['default-global-prefix'])
 
 derive('omit', ({ omit, production, optional, only, include }) => {
   const derived = [...omit]

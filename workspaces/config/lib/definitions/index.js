@@ -70,11 +70,7 @@ const setDefine = (key, def) => {
     // locations, or if the location is default or if this is one of the definitions
     // valid locations. anything else gets set to a special type that will not allow
     // any value
-    const allowed =
-      !def.location.length ||
-      def.location.includes(where) ||
-      [Locations.default, Locations.builtin].includes(where)
-    E.types[where][key] = allowed ? def.type : [Types.NotAllowed]
+    E.types[where][key] = def.isAllowed(where) ? def.type : [Types.NotAllowed]
   }
 
   for (const s of def.short) {
@@ -107,7 +103,7 @@ const main = () => {
   Object.freeze(E.defaults)
   Object.freeze(E.types)
   Object.freeze(E.shorthands)
-  Object.freeze(E.shortKeys)
+  Object.freeze(E.shorthandKeys)
 
   for (const key of internalKeys) {
     setInternal(key, internal[key])
@@ -116,8 +112,8 @@ const main = () => {
   Object.freeze(E.internal)
   Object.freeze(E.internalKeys)
 
-  for (const [key, derivedOpts] of derived.entries()) {
-    setDerive(key, ...derivedOpts)
+  for (const key of derivedKeys) {
+    setDerive(key, derived[key])
   }
 
   // graph it
