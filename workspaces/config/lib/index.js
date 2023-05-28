@@ -5,9 +5,8 @@ const mapWorkspaces = require('@npmcli/map-workspaces')
 const rpj = require('read-package-json-fast')
 const log = require('proc-log')
 const { resolve, dirname, join } = require('path')
-const { homedir } = require('os')
 const fs = require('fs/promises')
-const SetGlobal = require('./set-globals.js')
+const SetGlobal = require('./set-envs.js')
 const { ErrInvalidAuth } = require('./errors')
 const ConfigTypes = require('./config-locations')
 const ConfigData = require('./config-data')
@@ -30,22 +29,14 @@ class Config {
   #argv = null
   #localPrefixRoot = null
 
-  // references to globals
-  #process = null
-  #env = null
-
   // set during init which is called in ctor
   #clean = null
-  #title = null
 
   // set when we load configs
   #loaded = false
   #bailout = null
 
   // functions
-  #setEnv = null
-  #setNpmEnv = null
-  #setProcess = null
   #credentials = null
 
   // state
@@ -60,23 +51,6 @@ class Config {
     this.#argv = argv
     this.#localPrefixRoot = localPrefixRoot
 
-    // these are kept private for accessing throughout the class and some
-    // of them are allowed public access if they are needed in the derived
-    // property getters
-    this.#process = process
-    this.#env = this.#process.env
-
-    this.#setInternal('node-version', this.#process.version)
-    this.#setInternal('platform', this.#process.platform)
-    this.#setInternal('arch', this.#process.arch)
-    this.#setInternal('exec-path', this.#process.execPath)
-    this.#setInternal('npm-exec-path', require.main?.filename)
-    this.#setInternal('cwd', this.#process.cwd())
-    this.#setInternal('home', this.#env.HOME || homedir())
-    this.#setInternal('dumb-term', this.#env.TERM === 'dumb')
-    this.#setInternal('stderr-tty', !!this.#process.stderr.isTTY)
-    this.#setInternal('stderr-tty', !!this.#process.stdout.isTTY)
-
     try {
       const { version } = require(join(this.#builtinRoot, 'package.json'))
       this.#setInternal('npm-version', version)
@@ -90,15 +64,7 @@ class Config {
     // using the detected home and platform
     Definitions.getData((k) => this.#getInternal(k))
 
-    this.#configData = new ConfigTypes({
-      envReplace: (k) => SetGlobal.replaceEnv(this.#env, k),
-      config: this,
-    })
-
-    // bind some private helper functions to the process and env
-    this.#setEnv = (...args) => SetGlobal.setEnv(this.#env, ...args)
-    this.#setNpmEnv = (...args) => SetGlobal.npm.setEnv(this.#env, ...args)
-    this.#setProcess = (...args) => SetGlobal.setProcess(this.#process, ...args)
+    this.#configData = new ConfigTypes()
 
     this.#credentials = {
       setByURI: (uri) => this.#setByURI(uri),
@@ -144,6 +110,10 @@ class Config {
     return this.#getInternal('npm-args')
   }
 
+  get title () {
+    return this.#getInternal('title')
+  }
+
   get flat () {
     return this.#configData.data
   }
@@ -171,10 +141,6 @@ class Config {
 
   get clean () {
     return this.#clean
-  }
-
-  get title () {
-    return this.#title
   }
 
   // this is used in init-package-json (which it probably shouldn't be)
@@ -260,11 +226,11 @@ class Config {
   //
   // =============================================
   #loadEnv () {
-    const data = Object.entries(this.#env).reduce((acc, [key, val]) => {
-      if (!SetGlobal.npm.testKey(key) || !val) {
+    const data = Object.entries(process.env).reduce((acc, [key, val]) => {
+      if (!SetGlobal.testEnvKey(key) || !val) {
         return acc
       }
-      const configKey = key.slice(SetGlobal.npm.envPrefix.length)
+      const configKey = key.slice(SetGlobal.envPrefix.length)
       if (nerfDart.isNerfed(configKey)) {
         // don't normalize nerf-darted keys
         acc[configKey] = val
@@ -316,9 +282,8 @@ class Config {
 
     // Secrets are mostly in configs, so title is set using only the positional args
     // to keep those from being leaked.
-    this.#title = `npm ${replaceInfo(remain).join(' ')}`.trim()
-    this.#setProcess('title', this.#title)
-    log.verbose('config', 'title', this.#title)
+    this.#setInternal('title', `npm ${replaceInfo(remain).join(' ')}`.trim())
+    log.verbose('config', 'title', this.#getInternal('title'))
 
     // The cooked argv is also logged separately for debugging purposes. It is
     // cleaned as a best effort by replacing known secrets like basic auth
@@ -441,13 +406,12 @@ class Config {
       if (node?.toUpperCase() !== this.#getInternal('exec-path').toUpperCase()) {
         log.verbose('config', 'node symlink', node)
         this.#setInternal('exec-path', node)
-        this.#setProcess('execPath', node)
       }
     })
 
     let prefix
-    if (this.#env.PREFIX) {
-      prefix = this.#env.PREFIX
+    if (process.env.PREFIX) {
+      prefix = process.env.PREFIX
     } else if (this.#getInternal('platform') === 'win32') {
       // c:\node\node.exe --> prefix=c:\node\
       prefix = dirname(this.#getInternal('exec-path'))
@@ -455,8 +419,8 @@ class Config {
       // /usr/local/bin/node --> prefix=/usr/local
       prefix = dirname(dirname(this.#getInternal('exec-path')))
       // destdir only is respected on Unix
-      if (this.#env.DESTDIR) {
-        prefix = join(this.#env.DESTDIR, prefix)
+      if (process.env.DESTDIR) {
+        prefix = join(process.env.DESTDIR, prefix)
       }
     }
 
@@ -537,38 +501,16 @@ class Config {
         // config is the default, if the env thought different, then we
         // have to set it BACK to the default in the environment.
         if (!SetGlobal.sameValue(envConf.get(key), value)) {
-          this.#setNpmEnv(key, value)
+          SetGlobal.setEnv(process.env, key, value)
         }
       } else {
         // config is not the default.  if the env wasn't the one to set
         // it that way, then we have to put it in the env
         if (!(envConf.has(key) && !cliConf.has(key))) {
-          this.#setNpmEnv(key, value)
+          SetGlobal.setEnv(process.env, key, value)
         }
       }
     }
-
-    this.#setNpmEnv('global-prefix', this.#get('global-prefix'))
-    this.#setNpmEnv('local-prefix', this.#get('local-prefix'))
-    this.#setNpmEnv('user-agent', this.#get('user-agent'))
-
-    this.#setEnv('COLOR', this.#get('color') ? '1' : '0')
-    this.#setEnv('NODE_ENV', this.#get('omit').includes('dev') ? 'production' : null)
-
-    // XXX make this the bin/npm-cli.js file explicitly instead
-    // otherwise using npm programmatically is a bit of a pain.
-    this.#setEnv('npm_execpath', this.#get('npm-bin') ?? null)
-
-    // also set some other common nice envs that we want to rely on
-    this.#setEnv('INIT_CWD', this.#getInternal('cwd'))
-    this.#setEnv('HOME', this.#getInternal('home'))
-    this.#setEnv('NODE', this.#getInternal('exec-path'))
-    this.#setEnv('npm_node_execpath', this.#getInternal('exec-path'))
-    this.#setEnv('npm_command', this.command)
-    this.#setEnv('EDITOR', cliConf.get('editor') ?? null)
-    // note: this doesn't afect the *current* node process, of course, since
-    // it's already started, but it does affect the options passed to scripts.
-    this.#setEnv('NODE_OPTIONS', cliConf.get('node-options') ?? null)
   }
 
   // =============================================
@@ -793,6 +735,4 @@ module.exports = {
   Config,
   Locations,
   ConfigData,
-  EnvKeys: [...SetGlobal.EnvKeys.values()],
-  ProcessKeys: [...SetGlobal.ProcessKeys.values()],
 }

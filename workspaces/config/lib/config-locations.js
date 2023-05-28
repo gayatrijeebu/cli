@@ -1,13 +1,13 @@
 const ConfigData = require('./config-data')
 const { getFlatKey } = require('./definitions/definition')
+const { LocationNames } = require('./definitions/locations')
 const {
   definitions,
   definitionKeys,
   derived,
   derivedKeys,
-  values,
+  internals,
   internalKeys,
-  LocationEntries,
 } = require('./definitions')
 
 // TODO: flatten based on key match
@@ -37,9 +37,6 @@ const defineBaseAndFlat = (obj, key, descriptor) => {
 }
 
 class ConfigLocations extends Map {
-  #envReplace = null
-  #config = null
-
   #list = []
   #revList = []
   #indexes = {}
@@ -50,17 +47,14 @@ class ConfigLocations extends Map {
   #base = new Map()
   #derived = new Map()
 
-  constructor ({ envReplace, config }) {
+  constructor () {
     super()
 
-    this.#envReplace = envReplace
-    this.#config = config
-
-    for (const key of definitionKeys) {
-      this.#createBaseDescriptor(key)
+    for (const key of internalKeys) {
+      this.#createInternalDescriptor(key)
     }
 
-    for (const key of internalKeys) {
+    for (const key of definitionKeys) {
       this.#createBaseDescriptor(key)
     }
 
@@ -68,8 +62,8 @@ class ConfigLocations extends Map {
       this.#createDerivedDescriptor(key)
     }
 
-    for (const [where, conf] of LocationEntries) {
-      this.add({ ...conf, where }, conf.data)
+    for (const where of LocationNames) {
+      this.add(where)
     }
 
     // symbols for mutating config data are shared here so that no method is exposed
@@ -96,7 +90,6 @@ class ConfigLocations extends Map {
     const data = new ConfigData(location, {
       parent: this,
       data: configData,
-      envReplace: this.#envReplace,
     })
 
     this.#indexes[data.where] = this.#list.push(data.where) - 1
@@ -197,18 +190,18 @@ class ConfigLocations extends Map {
 
   // TODO: move nerfdart auth stuff into a nested object that
   // is only passed along to paths that end up calling npm-registry-fetch.
-  #createBaseDescriptor (key, data = this.#baseData) {
+  #createBaseDescriptor (key, def, data = this.#baseData) {
     defineBaseAndFlat(data, key, cacheDescriptor(
       { key, cache: this.#base },
       () => this.#getBaseData(null, key)
     ))
   }
 
-  #createValueDescriptor (key) {
+  #createInternalDescriptor (key) {
     Object.defineProperty(this.#data, getFlatKey(key), {
       configurable: false,
       enumerable: true,
-      value: values[key],
+      value: internals[key],
     })
   }
 
@@ -229,7 +222,7 @@ class ConfigLocations extends Map {
     const derive = derived[key]
     Object.defineProperty(data, derive.flatKey, cacheDescriptor(
       { key, cache: this.#derived },
-      () => derive.get(this.#baseData, this.#config)
+      () => derive.get(this.#baseData)
     ))
   }
 }

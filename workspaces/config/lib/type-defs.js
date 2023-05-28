@@ -2,6 +2,7 @@ const { typeDefs: noptDefs } = require('nopt').lib
 const semver = require('semver')
 const querystring = require('querystring')
 const { resolve } = require('path')
+const { readFileSync } = require('fs')
 const { networkInterfaces } = require('os')
 
 // This is set by the config constructor and allows the types
@@ -84,9 +85,7 @@ const validateUmask = (data, k, val) => {
   data[k] = val
 }
 
-// Override nopt path validaton to use the HOME and PLATFORM
-// values set by @npmcli/config constructor
-const validatePath = (data, k, val) => {
+const parsePath = (val) => {
   if (typeof val !== 'string') {
     return false
   }
@@ -95,11 +94,37 @@ const validatePath = (data, k, val) => {
   const homePattern = isWin ? /^~(\/|\\)/ : /^~\//
   const home = getData('home')
 
-  if (home && val.match(homePattern)) {
-    data[k] = resolve(home, val.slice(2))
-  } else {
-    data[k] = resolve(val)
+  return home && val.match(homePattern)
+    ? resolve(home, val.slice(2))
+    : resolve(val)
+}
+
+// Override nopt path validaton to use the HOME and PLATFORM
+// values set by @npmcli/config constructor
+const validatePath = (data, k, val) => {
+  const pathVal = parsePath(val)
+  if (pathVal === false) {
+    return false
   }
+
+  data[k] = pathVal
+}
+
+const validateFile = (data, k, val) => {
+  const pathVal = parsePath(val)
+  if (pathVal === false) {
+    return false
+  }
+
+  try {
+    data[k] = readFileSync(pathVal, 'utf8')
+    return
+  } catch (er) {
+    if (er.code !== 'ENOENT') {
+      throw er
+    }
+  }
+  return false
 }
 
 function validatePositiveNumber (data, k, val) {
@@ -143,6 +168,18 @@ const isStrictBool = (val) => {
 // `typeDescription` gets displayed in the docs for the `Type:`
 type('String', {
   validate: noptDefs.String.validate,
+  typeDescription: 'String',
+  description: 'a string',
+})
+
+type('LowercaseString', {
+  validate: (data, k, val) => {
+    const valid = noptDefs.String.validate(data, k, val)
+    if (valid === false) {
+      return false
+    }
+    data[k] = data[k].toLowerCase()
+  },
   typeDescription: 'String',
   description: 'a string',
 })
@@ -220,6 +257,12 @@ type('Path', {
   validate: validatePath,
   typeDescription: 'Path',
   description: 'a valid filesystem path',
+})
+
+type('File', {
+  validate: validateFile,
+  typeDescription: 'File',
+  description: 'a valid filesystem path to be read as utf-8',
 })
 
 type('SemVer', {

@@ -11,79 +11,56 @@ const { Locations } = require('./locations')
 
 const hasOwn = (o, k) => Object.prototype.hasOwnProperty.call(o, k)
 
-// special affordance for ssl -> SSL and tty -> TTY
-const getFlatKey = (k) => k.replace(/-(ssl|tty|[a-z])/g, (...a) => a[1].toUpperCase())
-
-class Derived {
-  #get = null
-  #flatKey = null
-  #sources = null
-
-  get get () {
-    return this.#get
-  }
-
-  get sources () {
-    return this.#sources
-  }
-
-  get flatKey () {
-    return this.#flatKey
-  }
-
-  constructor (key, { get, nested, sources } = {}) {
-    this.#flatKey = getFlatKey(key)
-    this.#get = get
-
-    if (!this.#get) {
-      throw new Error(`Invalid value for derived key ${key} get: ${get}`)
-    }
-
-    if (nested) {
-      const originalFn = this.#get
-      this.#get = (...args) => originalFn(...args)[this.#flatKey]
-    }
-
-    const sourcesSet = new Set([sources])
-    sourcesSet.add(key)
-
-    this.#sources = [...sourcesSet]
-  }
-}
+const identity = v => v
 
 class Definition {
-  static required = ['type', 'description', 'default']
+  // special affordance for ssl -> SSL and tty -> TTY
+  static getFlatKey = (k) => k.replace(/-(ssl|tty|[a-z])/g, (...a) => a[1].toUpperCase())
+
+  static required = ['default', 'description', 'type']
   static allowed = [
     ...Definition.required,
-    'exclusive',
+    'alias',
     'defaultDescription',
     'deprecated',
+    'depends',
+    'derived',
+    'envExport',
+    'exclusive',
     'flatten',
     'hint',
+    'location',
+    'setEnv',
+    'setProcess',
     'short',
     'usage',
-    'envExport',
-    'location',
   ]
 
   #key = null
   #def = null
-  #derived = new Set()
+
+  #shortKeys = []
+  #aliasKeys = []
+  #shorthands = []
+
+  #getValue = identity
+  #flattenTo = new Set()
+
+  #envKeys = []
+  #envEntries = []
+  #processKeys = []
+  #processEntries = []
 
   constructor (key, def) {
     this.#key = key
     this.#def = def
 
-    if (def.flatten === true) {
-      this.#derived.add(key)
-    } else if (typeof def.flatten === 'string') {
-      this.#derived.add(def.flatten)
-    } else if (Array.isArray(def.flatten) && def.flatten.every(f => typeof f === 'string')) {
-      for (const f of def.flatten) {
-        this.#derived.add(f)
-      }
-    } else if (def.flatten) {
-      throw new Error('flatten must be true, a string or an array of strings')
+    for (const f of [].concat(def.flatten ?? [])) {
+      this.#addFlat(f)
+    }
+
+    if (!this.#flattenTo.size) {
+      console.log(key)
     }
 
     if (!Array.isArray(this.#def.type)) {
@@ -100,6 +77,42 @@ class Definition {
       this.#def.type.unshift(null)
     }
 
+    if (this.#def.setEnv) {
+      for (const [envKey, envValue] of Object.entries(this.#def.setEnv)) {
+        this.#envKeys.push(envKey)
+        this.#envEntries.push([envKey, envValue === true ? identity : envValue])
+      }
+    }
+
+    if (this.#def.setProcess) {
+      for (const [procKey, procValue] of Object.entries(this.#def.setProcess)) {
+        this.#processKeys.push(procKey)
+        this.#processEntries.push([procKey, procValue === true ? identity : procValue])
+      }
+    }
+
+    // There is currently no difference between aliases and shorts but
+    // they are separated to make a future upgrade path from nopt easier
+    const { short = [], alias = [] } = this.#def
+
+    if (typeof short === 'string') {
+      this.#addShort(short)
+    } else if (short && typeof short === 'object') {
+      const isArr = Array.isArray(short)
+      for (const s of isArr ? short : Object.entries(short)) {
+        this.#addShort(...isArr ? [s] : s)
+      }
+    }
+
+    if (typeof alias === 'string') {
+      this.#addAlias(alias)
+    } else if (alias && typeof alias === 'object') {
+      const isArr = Array.isArray(alias)
+      for (const s of isArr ? alias : Object.entries(alias)) {
+        this.#addAlias(...isArr ? [s] : s)
+      }
+    }
+
     // needs a key
     if (!this.#key) {
       throw new Error(`config lacks key: ${this.#key}`)
@@ -107,7 +120,7 @@ class Definition {
 
     // needs required keys
     for (const req of Definition.required) {
-      if (typeof req === 'string' && !hasOwn(this.#def, req)) {
+      if (!hasOwn(this.#def, req)) {
         throw new Error(`config \`${this.#key}\` lacks required key: \`${req}\``)
       }
     }
@@ -134,7 +147,15 @@ class Definition {
   }
 
   get short () {
-    return [].concat(this.#def.short ?? [])
+    return this.#shortKeys
+  }
+
+  get alias () {
+    return this.#aliasKeys
+  }
+
+  get shorthands () {
+    return this.#shorthands
   }
 
   get isBoolean () {
@@ -149,8 +170,32 @@ class Definition {
     return this.#def.type
   }
 
-  get derived () {
-    return [...this.#derived.values()]
+  get flattenTo () {
+    return [...this.#flattenTo]
+  }
+
+  get getValue () {
+    return this.#getValue
+  }
+
+  get dependsOn () {
+    return this.#def.depends ?? []
+  }
+
+  get envKeys () {
+    return this.#envKeys
+  }
+
+  get setEnv () {
+    return this.#envEntries
+  }
+
+  get processKeys () {
+    return this.#processKeys
+  }
+
+  get setProcess () {
+    return this.#processEntries
   }
 
   get location () {
@@ -163,6 +208,55 @@ class Definition {
       : `\nThis config can not be used with: \`${this.#def.exclusive.join('`, `')}\``
   }
 
+  get #typeMultiple () {
+    return this.type.includes(Types.Array)
+  }
+
+  get #typeDefs () {
+    return this.type.map((t) => getType(t) ?? t)
+  }
+
+  // alias and short definitions can include values so we only add them to the
+  // keys if they map to the same value as using the full key would since these
+  // are shown in usage
+  #addShort (...args) {
+    if (args.length === 1 || args[1] === true) {
+      this.#shortKeys.push(args[0])
+    }
+    this.#addShorthand(...args)
+  }
+
+  #addAlias (...args) {
+    if (args.length === 1 || args[1] === true) {
+      this.#aliasKeys.push(args[0])
+    }
+    this.#addShorthand(...args)
+  }
+
+  #addShorthand (key, value) {
+    // TODO: when we switch off of nopt, use an arg parser that supports
+    // more reasonable aliasing and short opts right in the definitions set.
+    // aliases where they get expanded into a completely different thing
+    // these are NOT supported in the environment or npmrc files, only
+    // expanded on the CLI.
+    let shorthand = [`--${this.#key}`]
+    if (typeof value === 'string') {
+      shorthand.push(value)
+    } else if (value === false) {
+      shorthand = [`--no-${this.#key}`]
+    }
+    this.#shorthands.push([key, shorthand])
+  }
+
+  #addFlat (f) {
+    const isFunc = typeof f === 'function'
+    const key = f === true || isFunc ? this.#key : f
+    this.#flattenTo.add(Definition.getFlatKey(key))
+    if (isFunc) {
+      this.#getValue = f
+    }
+  }
+
   isAllowed (where) {
     // a type is allowed for each location if the definition didnt specify any
     // locations, or if the location is default or if this is one of the definitions
@@ -170,24 +264,6 @@ class Definition {
     return !this.location.length ||
       this.location.includes(where) ||
       [Locations.default, Locations.builtin].includes(where)
-  }
-
-  addDerived (...keys) {
-    for (const k of keys) {
-      this.#derived.add(k)
-    }
-  }
-
-  hasDerived (k) {
-    return this.#derived.has(k)
-  }
-
-  get #typeMultiple () {
-    return this.type.includes(Types.Array)
-  }
-
-  get #typeDefs () {
-    return this.type.map((t) => getType(t) ?? t)
   }
 
   // a textual description of this config, suitable for help output
@@ -237,7 +313,10 @@ class Definition {
   }
 
   describeUsage () {
-    const usage = this.short.map(s => `-${s}`)
+    const usage = [
+      ...this.short.map(s => `-${s}`),
+      ...this.alias.map(s => `--${s}`),
+    ]
 
     if (this.isBoolean) {
       if (this.default === true) {
@@ -335,4 +414,4 @@ const wrapAll = s => {
   }).join('\n\n')
 }
 
-module.exports = { Definition, Derived, getFlatKey }
+module.exports = Definition

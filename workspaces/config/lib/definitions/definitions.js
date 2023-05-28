@@ -1,112 +1,140 @@
 const ciInfo = require('ci-info')
+const { homedir } = require('os')
+const { resolve, join } = require('path')
 const { Types } = require('../type-defs')
 const { Locations } = require('./locations')
-const { Definition } = require('./definition.js')
-const { resolve } = require('npm-package-arg')
+const Definition = require('./definition.js')
 
 const {
-  EDITOR,
-  VISUAL,
-  SYSTEMROOT,
   ComSpec = 'cmd',
-  SHELL = 'sh',
+  EDITOR,
+  HOME,
+  LANG,
   LC_ALL,
   LC_CTYPE,
-  LANG,
   LOCALAPPDATA,
-  NODE_ENV,
   NO_COLOR,
+  NODE,
+  NODE_ENV,
+  SHELL = 'sh',
+  SYSTEMROOT,
+  TERM,
+  VISUAL,
 } = process.env
-
-const isWindows = process.platform === 'win32'
-
-const Editor = EDITOR || VISUAL || (isWindows ? `${SYSTEMROOT}\\notepad.exe` : 'vi')
-const Shell = isWindows ? ComSpec : SHELL
+const StdoutTTY = !!process.stdout?.isTTY
+const StderrTTY = !!process.stderr?.isTTY
+const IsWindows = process.platform === 'win32'
+const Editor = EDITOR || VISUAL || (IsWindows ? `${SYSTEMROOT}\\notepad.exe` : 'vi')
+const Shell = IsWindows ? ComSpec : SHELL
 const Unicode = /UTF-?8$/i.test(LC_ALL || LC_CTYPE || LANG)
 // use LOCALAPPDATA on Windows, if set https://github.com/npm/cli/pull/899
-const CacheRoot = (isWindows && LOCALAPPDATA) || '~'
-const Cache = `${CacheRoot}/${isWindows ? 'npm-cache' : '.npm'}`
-
-const CiName = ciInfo.name ? ciInfo.name.toLowerCase().split(' ').join('-') : null
+const CacheRoot = `${(IsWindows && LOCALAPPDATA) || '~'}/${IsWindows ? 'npm-cache' : '.npm'}`
+const CiName = ciInfo.name?.toLowerCase().split(' ').join('-') ?? null
 
 const E = module.exports = {
   definitions: {},
   definitionKeys: [],
+  internals: {},
+  internalKeys: [],
+  derived: {},
+  derivedKeys: [],
 }
+
 const define = (key, v) => {
   E.definitions[key] = new Definition(key, v)
   E.definitionKeys.push(key)
 }
+
 const internal = (key, v) => {
-  E.definitions[key] = new Definition(key, v)
-  E.definitionKeys.push(key)
+  E.internals[key] = new Definition(key, {
+    ...v,
+    description: null,
+    location: [Locations.internal],
+  })
+  E.internalKeys.push(key)
 }
+
 const derive = (key, v) => {
-  E.definitions[key] = new Definition(key, v)
-  E.definitionKeys.push(key)
+  E.derived[key] = new Definition(key, {
+    ...v,
+    description: null,
+    derived: true,
+  })
+  E.derivedKeys.push(key)
 }
 
-internal('npm-command', {
-  type: Types.String,
-})
-
-internal('npm-args', {
-  default: [],
-  type: [Types.String, Types.Array],
-})
-
-internal('npm-version', {
-  type: Types.String,
-})
-
-internal('npm-bin', {
-  type: Types.String,
-})
-
-internal('npm-exec-path', {
-  type: Types.String,
-})
-
-internal('node-version', {
-  type: Types.String,
-})
-
-internal('node-bin', {
-  type: Types.String,
-})
-
-internal('platform', {
-  type: Types.String,
-})
-
+/*
+ *
+ * Internal values
+ * these are one that we know the value of right now
+ *
+ */
 internal('arch', {
-  type: Types.String,
-})
-
-internal('stderr-tty', {
-  type: Types.Boolean,
-})
-
-internal('stdout-tty', {
-  type: Types.Boolean,
-})
-
-internal('dumb-term', {
-  type: Types.Boolean,
-})
-
-internal('exec-path', {
+  default: process.arch,
   type: Types.String,
 })
 
 internal('cwd', {
+  default: process.cwd(),
   type: Types.String,
+  setEnv: {
+    INIT_CWD: true,
+  },
+})
+
+internal('exec-path', {
+  default: process.execPath,
+  type: Types.String,
+  setEnv: {
+    NODE: true,
+    npm_node_execpath: true,
+  },
+  setProcess: {
+    execPath: true,
+  },
 })
 
 internal('home', {
+  default: HOME ?? homedir(),
+  type: Types.String,
+  setEnv: {
+    HOME: true,
+  },
+})
+
+// XXX should this be sha512?  is it even relevant?
+internal('hash-algorithm', {
+  default: 'sha1',
   type: Types.String,
 })
 
+internal('node-version', {
+  default: process.version,
+  type: Types.String,
+})
+
+internal('npm-bin', {
+  default: require.main?.filename ?? null,
+  type: Types.String,
+  setEnv: {
+    // XXX make this the bin/npm-cli.js file explicitly instead
+    // otherwise using npm programmatically is a bit of a pain.
+    npm_execpath: true,
+  },
+})
+
+internal('platform', {
+  default: process.platform,
+  type: Types.String,
+})
+
+/*
+ *
+ * Internal values
+ * these are set at some point during config init/load. they are
+ * registered here so that all keys are in a single place
+ *
+ */
 internal('default-global-prefix', {
   type: Types.String,
 })
@@ -123,13 +151,65 @@ internal('local-package', {
   type: Types.Boolean,
 })
 
-// XXX should this be sha512?  is it even relevant?
-internal('hash-algorithm', {
-  default: 'sha1',
+internal('npm-args', {
+  default: [],
+  type: [Types.String, Types.Array],
+})
+
+internal('npm-command', {
+  type: Types.String,
+  setEnv: {
+    npm_command: true,
+  },
+})
+
+internal('npm-version', {
   type: Types.String,
 })
 
-// DERIVED
+internal('title', {
+  type: Types.String,
+  setProcess: {
+    title: true,
+  },
+})
+
+/*
+ *
+ * Derived
+ *
+ *
+ */
+derive('cache', {
+  type: Types.Path,
+  depends: ['cache-root'],
+  flatten: ({ cacheRoot }) => {
+    return join(cacheRoot, '_cacache')
+  },
+})
+
+derive('color', {
+  type: Types.Boolean,
+  depends: ['color-raw'],
+  flatten: ({ colorRaw }) => {
+    return colorRaw === 'always' ? true : StdoutTTY
+  },
+  setEnv: {
+    COLOR: (color) => color ? '1' : '0',
+  },
+})
+
+derive('global-prefix', {
+  type: Types.Path,
+  depends: ['prefix', 'default-global-prefix'],
+  flatten: ({ prefix, defaultGlobalPrefix }) => {
+    return prefix ?? defaultGlobalPrefix
+  },
+  setEnv: {
+    npm_global_prefix: true,
+  },
+})
+
 derive('local-prefix', {
   type: Types.Path,
   depends: [
@@ -160,16 +240,87 @@ derive('local-prefix', {
 
     return defaultLocalPrefixWorkspace ?? defaultPrefix
   },
-})
-
-derive('global-prefix', {
-  type: Types.Path,
-  flatten: ({ prefix, defaultGlobalPrefix }) => {
-    return prefix ?? defaultGlobalPrefix
+  setEnv: {
+    npm_local_prefix: true,
   },
 })
 
-// Define all config keys we know about
+derive('log-color', {
+  type: Types.Boolean,
+  depends: ['color-raw'],
+  flatten: ({ colorRaw }) => {
+    return colorRaw === 'always' ? true : StderrTTY
+  },
+})
+
+derive('npx-cache', {
+  type: Types.Path,
+  depends: ['cache-root'],
+  flatten: ({ cacheRoot }) => {
+    return join(cacheRoot, '_npx')
+  },
+})
+
+derive('node-bin', {
+  type: Types.String,
+  depends: ['exec-path'],
+  flatten: ({ execPath }) => {
+    return NODE ?? execPath
+  },
+})
+
+derive('save-type', {
+  type: Types.Boolean,
+  depends: ['save-dev', 'save-optional', 'save-peer', 'save-prod'],
+  flatten: ({ saveDev, saveOptional, savePeer, saveProd }) => {
+    if (savePeer && saveOptional) {
+      return 'peerOptional'
+    }
+    if (savePeer) {
+      return 'peer'
+    }
+    if (saveOptional) {
+      return 'optional'
+    }
+    if (saveDev) {
+      return 'dev'
+    }
+    if (saveProd) {
+      return 'prod'
+    }
+    return null
+  },
+})
+
+derive('silent', {
+  type: Types.Boolean,
+  depends: ['loglevel'],
+  flatten: ({ loglevel }) => {
+    return loglevel === 'silent'
+  },
+})
+
+derive('tuf-cache', {
+  type: Types.Path,
+  depends: ['cache-root'],
+  flatten: ({ cacheRoot }) => {
+    return join(cacheRoot, '_tuf')
+  },
+})
+
+derive('workspaces-enabled', {
+  type: Types.Boolean,
+  depends: ['workspaces'],
+  flatten: ({ workspaces }) => {
+    return workspaces !== false
+  },
+})
+
+/*
+ *
+ * Defintions
+ * Define all config keys we know about
+ */
 define('_auth', {
   type: Types.String,
   description: `
@@ -262,10 +413,14 @@ define('auth-type', {
     What authentication strategy to use with \`login\`.
     Note that if an \`otp\` config is given, this value will always be set to \`legacy\`.
   `,
-  flatten: true,
+  depends: ['otp'],
+  flatten: (authType, { otp }) => {
+    return otp ? 'legacy' : authType
+  },
 })
 
 define('before', {
+  alias: 'enjoy-by',
   type: Types.Date,
   description: `
     If passed to \`npm install\`, will rebuild the npm tree such that only
@@ -335,11 +490,14 @@ define('ca', {
 
     See also the \`strict-ssl\` config.
   `,
-  flatten: true,
+  depends: ['cafile'],
+  flatten: (ca, { cafile }) => {
+    return (ca ?? []).concat(cafile ?? [])
+  },
 })
 
 define('cache', {
-  default: Cache,
+  default: CacheRoot,
   defaultDescription: `
     Windows: \`%LocalAppData%\\npm-cache\`, Posix: \`~/.npm\`
   `,
@@ -347,6 +505,7 @@ define('cache', {
   description: `
     The location of npm's cache directory.
   `,
+  flatten: 'cache-root',
 })
 
 define('cache-max', {
@@ -372,12 +531,20 @@ define('cache-min', {
 })
 
 define('cafile', {
-  type: Types.Path,
+  type: Types.File,
   description: `
     A path to a file containing one or multiple Certificate Authority signing
     certificates. Similar to the \`ca\` setting, but allows for multiple
     CA's, as well as for the CA information to be stored in a file on disk.
   `,
+  flatten: (cafile) => {
+    const delim = '-----END CERTIFICATE-----'
+    return cafile
+      ?.replace(/\r\n/g, '\n')
+      .split(delim)
+      .filter(s => s.trim())
+      .map(s => s.trimStart() + delim)
+  },
 })
 
 define('call', {
@@ -456,6 +623,7 @@ define('color', {
     If false, never shows colors.  If \`"always"\` then always shows colors.
     If true, then only prints color codes for tty file descriptors.
   `,
+  flatten: 'color-raw',
 })
 
 define('commit-hooks', {
@@ -479,15 +647,20 @@ define('depth', {
     root project.  If \`--all\` is set, then npm will show all dependencies
     by default.
   `,
-  flatten: true,
+  depends: ['all'],
+  flatten: (depth, { all }) => {
+    return depth ?? all ? Infinity : 1
+  },
 })
 
 define('description', {
   default: true,
   type: Types.Boolean,
+  alias: 'desc',
   description: `
     Show the description in \`npm search\`
   `,
+  flatten: 'search.description',
 })
 
 define('dev', {
@@ -603,6 +776,9 @@ define('editor', {
     The command to run for \`npm edit\` and \`npm config edit\`.
   `,
   flatten: true,
+  setEnv: {
+    EDITOR: true,
+  },
 })
 
 define('engine-strict', {
@@ -764,6 +940,9 @@ define('global', {
   default: false,
   type: Types.Boolean,
   short: 'g',
+  alias: {
+    local: false,
+  },
   description: `
     Operates in "global" mode, so that packages are installed into the
     \`prefix\` folder instead of the current working directory.  See
@@ -776,21 +955,10 @@ define('global', {
     * man pages are linked to \`{prefix}/share/man\`
   `,
   depends: ['location'],
-  flatten: ({ global, location }) => {
+  flatten: (global, { location }) => {
     return location === 'global' || global
   },
 })
-
-derive(['prefix', 'globalconfig', 'global-prefix'],
-  ({ prefix, globalconfig, defaultGlobalPrefix }) => {
-    const defaultPrefix = prefix ?? defaultGlobalPrefix
-
-    return {
-      prefix: defaultPrefix,
-      globalPrefix: defaultPrefix,
-      globalconfig: globalconfig ?? resolve(defaultPrefix, 'etc/npmrc'),
-    }
-  }, ['default-global-prefix'])
 
 define('globalconfig', {
   type: Types.Path,
@@ -802,7 +970,7 @@ define('globalconfig', {
     The config file to read for global config options.
   `,
   depends: ['prefix', 'default-global-prefix'],
-  flatten: ({ globalconfig, prefix, defaultGlobalPrefix }) => {
+  flatten: (globalconfig, { prefix, defaultGlobalPrefix }) => {
     // if the prefix is set on cli, env, or userconfig, then we need to
     // default the globalconfig file to that location, instead of the default
     // global prefix.  It's weird that `npm get globalconfig --prefix=/foo`
@@ -885,6 +1053,28 @@ define('include', {
     regardless of the order in which omit/include are specified on the
     command-line.
   `,
+  depends: ['dev', 'production', 'optional', 'also'],
+  flatten: (include, { dev, production, optional, also }) => {
+    const derived = [...include]
+
+    if (production === false) {
+      derived.push('dev')
+    }
+
+    if (/^dev/.test(also)) {
+      derived.push('dev')
+    }
+
+    if (dev) {
+      derived.push('dev')
+    }
+
+    if (optional === true) {
+      derived.push('optional')
+    }
+
+    return [...new Set(derived)]
+  },
 })
 
 define('include-staged', {
@@ -1057,7 +1247,10 @@ define('install-strategy', {
     linked: (experimental) install in node_modules/.store, link in place,
       unhoisted.
   `,
-  flatten: true,
+  depends: ['global-style', 'legacy-bundling', 'install-strategy'],
+  flatten: (installStrategy, { globalStyle, legacyBundling }) => {
+    return globalStyle ? 'shallow' : legacyBundling ? 'nested' : installStrategy
+  },
 })
 
 define('json', {
@@ -1175,7 +1368,7 @@ define('location', {
     * man pages are linked to \`{prefix}/share/man\`
   `,
   depends: ['global'],
-  flatten: ({ global, location }) => {
+  flatten: (location, { global }) => {
     return global ? 'global' : location
   },
 })
@@ -1218,6 +1411,18 @@ define('loglevel', {
     'verbose',
     'silly',
   ],
+  short: {
+    d: 'info',
+    dd: 'verbose',
+    ddd: 'silly',
+    q: 'warn',
+    s: 'silent',
+  },
+  alias: {
+    quiet: 'warn',
+    silent: 'silent',
+    verbose: 'verbose',
+  },
   description: `
     What level of logs to report.  All logs are written to a debug log,
     with the path to that file printed if the execution of a command fails.
@@ -1238,6 +1443,10 @@ define('logs-dir', {
     The location of npm's log directory.  See [\`npm
     logging\`](/using-npm/logging) for more information.
   `,
+  depends: ['cache-root'],
+  flatten: (logsDir, { cacheRoot }) => {
+    return logsDir ?? join(cacheRoot, '_logs')
+  },
 })
 
 define('logs-max', {
@@ -1288,6 +1497,11 @@ define('node-options', {
     variable.  This does not impact how npm itself is executed but it does
     impact how lifecycle scripts are called.
   `,
+  setEnv: {
+    // note: this doesn't afect the *current* node process, of course, since
+    // it's already started, but it does affect the options passed to scripts.
+    NODE_OPTIONS: true,
+  },
 })
 
 define('noproxy', {
@@ -1335,6 +1549,23 @@ define('omit', {
     environment variable will be set to \`'production'\` for all lifecycle
     scripts.
   `,
+  depends: ['dev', 'production', 'optional', 'also', 'include'],
+  flatten: (omit, { production, optional, only, include }) => {
+    const derived = [...omit]
+
+    if (/^prod(uction)?$/.test(only) || production) {
+      derived.push('dev')
+    }
+
+    if (optional === false) {
+      derived.push('optional')
+    }
+
+    return [...new Set(derived)].filter(type => !include.includes(type))
+  },
+  setEnv: {
+    NODE_ENV: (omit) => omit.includes('dev') ? 'production' : null,
+  },
 })
 
 define('omit-lockfile-registry-resolved', {
@@ -1401,6 +1632,10 @@ define('package-lock', {
     This will also prevent _writing_ \`package-lock.json\` if \`save\` is
     true.
   `,
+  depends: ['package-lock-only'],
+  flatten: (packageLock, { packageLockOnly }) => {
+    return packageLock || packageLockOnly
+  },
 })
 
 define('package-lock-only', {
@@ -1431,6 +1666,7 @@ define('parseable', {
   default: false,
   type: Types.Boolean,
   short: 'p',
+  alias: 'porcelain',
   description: `
     Output parseable results from commands that write to standard output. For
     \`npm search\`, this will be tab-separated table format.
@@ -1456,7 +1692,10 @@ define('prefer-offline', {
     data will be requested from the server. To force full offline mode, use
     \`--offline\`.
   `,
-  flatten: true,
+  depends: ['cache-min'],
+  flatten: (preferOffline, { cacheMin }) => {
+    return cacheMin >= 9999 ? true : preferOffline
+  },
 })
 
 define('prefer-online', {
@@ -1466,7 +1705,10 @@ define('prefer-online', {
     If true, staleness checks for cached data will be forced, making the CLI
     look for updates immediately even for fresh package data.
   `,
-  flatten: true,
+  depends: ['cache-max'],
+  flatten: (preferOnline, { cacheMax }) => {
+    return cacheMax <= 0 ? true : preferOnline
+  },
 })
 
 define('prefix', {
@@ -1482,7 +1724,7 @@ define('prefix', {
     it forces non-global commands to run in the specified folder.
   `,
   depends: ['default-global-prefix'],
-  flatten: ({ prefix, defaultGlobalPrefix }) => {
+  flatten: (prefix, { defaultGlobalPrefix }) => {
     return prefix ?? defaultGlobalPrefix
   },
 })
@@ -1505,7 +1747,7 @@ define('production', {
 })
 
 define('progress', {
-  default: !ciInfo.isCI,
+  default: !(ciInfo.isCI || StderrTTY || TERM === 'dumb'),
   defaultDescription: `
     \`true\` unless running in a known CI system
   `,
@@ -1553,6 +1795,7 @@ define('proxy', {
 define('read-only', {
   default: false,
   type: Types.Boolean,
+  alias: 'readonly',
   description: `
     This is used to mark a token as unable to publish when configuring
     limited access tokens with the \`npm token create\` command.
@@ -1572,6 +1815,7 @@ define('rebuild-bundle', {
 define('registry', {
   default: 'https://registry.npmjs.org/',
   type: Types.URL,
+  alias: 'reg',
   description: `
     The base URL of the npm registry.
   `,
@@ -1625,7 +1869,15 @@ define('save-bundle', {
 
     Ignored if \`--save-peer\` is set, since peerDependencies cannot be bundled.
   `,
-  flatten: true,
+  depends: ['save-peer'],
+  flatten: (saveBundle, { savePeer }) => {
+    // XXX update arborist to just ignore it if resulting saveType is peer
+    // otherwise this won't have the expected effect:
+    //
+    // npm config set save-peer true
+    // npm i foo --save-bundle --save-prod <-- should bundle
+    return saveBundle && !savePeer
+  },
 })
 
 // XXX: We should really deprecate all these `--save-blah` switches
@@ -1682,6 +1934,10 @@ define('save-prefix', {
     \`npm config set save-prefix='~'\` it would be set to \`~1.2.3\` which
     only allows patch upgrades.
   `,
+  depends: ['save-exact'],
+  flatten: (savePrefix, { saveExact }) => {
+    return saveExact ? '' : savePrefix
+  },
 })
 
 define('save-prod', {
@@ -1730,7 +1986,7 @@ define('scope', {
     npm init --scope=@foo --yes
     \`\`\`
   `,
-  flatten: true,
+  flatten: [true, 'project-scope'],
 })
 
 define('script-shell', {
@@ -1747,7 +2003,7 @@ define('script-shell', {
 
 define('searchexclude', {
   default: '',
-  type: Types.String,
+  type: Types.LowercaseString,
   description: `
     Space-separated options that limit the results from search.
   `,
@@ -1961,18 +2217,14 @@ define('usage', {
   default: false,
   type: Types.Boolean,
   short: ['?', 'H', 'h'],
+  alias: 'help',
   description: `
     Show short usage output about the command specified.
   `,
 })
 
 define('user-agent', {
-  default: 'npm/{npm-version} ' +
-           'node/{node-version} ' +
-           '{platform} ' +
-           '{arch} ' +
-           'workspaces/{workspaces} ' +
-           '{ci}',
+  default: 'npm/{npm-version} node/{node-version} {platform} {arch} workspaces/{workspaces} {ci}',
   type: Types.String,
   description: `
     Sets the User-Agent request header.  The following fields are replaced
@@ -1987,7 +2239,36 @@ define('user-agent', {
     * \`{ci}\` - The value of the \`ci-name\` config, if set, prefixed with
       \`ci/\`, or an empty string if \`ci-name\` is empty.
   `,
-  flatten: true,
+  depends: [
+    'ci-name',
+    'workspaces',
+    'workspace',
+    'npm-version',
+    'node-version',
+    'platform',
+    'arch',
+  ],
+  flatten: (userAgent, {
+    ciName,
+    workspaces,
+    workspace,
+    npmVersion,
+    nodeVersion,
+    platform,
+    arch,
+  }) => {
+    return userAgent
+      .replace(/\{node-version\}/gi, nodeVersion)
+      .replace(/\{npm-version\}/gi, npmVersion)
+      .replace(/\{platform\}/gi, platform)
+      .replace(/\{arch\}/gi, arch)
+      .replace(/\{workspaces\}/gi, !!(workspaces || workspace?.length))
+      .replace(/\{ci\}/gi, ciName ? `ci/${ciName}` : '')
+      .trim()
+  },
+  setEnv: {
+    npm_user_agent: true,
+  },
 })
 
 define('userconfig', {
@@ -2029,7 +2310,7 @@ define('versions', {
 })
 
 define('viewer', {
-  default: isWindows ? 'browser' : 'man',
+  default: IsWindows ? 'browser' : 'man',
   defaultDescription: `
     "man" on Posix, "browser" on Windows
   `,
@@ -2104,7 +2385,13 @@ define('workspaces-update', {
 
 define('yes', {
   type: Types.Boolean,
-  short: 'y',
+  short: {
+    y: true,
+    n: false,
+  },
+  alias: {
+    no: false,
+  },
   description: `
     Automatically answer "yes" to any prompts that npm might print on
     the command line.

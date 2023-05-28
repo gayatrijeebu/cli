@@ -6,9 +6,13 @@ const fs = require('fs/promises')
 const { dirname } = require('path')
 const nerfDart = require('./nerf-dart')
 const { typeDefs } = require('./definitions/type-defs')
-const { definitions, shorthands, types, Locations } = require('./definitions')
+const { Locations, LocationOptions } = require('./definitions/locations')
+const { definitions, internals, shorthands, types } = require('./definitions')
 const tmpFile = require('./tmp-file')
+const { envReplace } = require('./set-envs')
 const { EOL } = require('os')
+
+const hasOwn = (o, k) => Object.prototype.hasOwnProperty.call(o, k)
 
 const SYMBOLS = {
   set: Symbol('set'),
@@ -22,9 +26,7 @@ class ConfigData extends Map {
   #parent = null
   #where = null
   #description = null
-  #type = null
-
-  #envReplace = null
+  #opts = null
 
   #data = {}
   #file = null
@@ -32,18 +34,19 @@ class ConfigData extends Map {
   #valid = true
   #error = null
 
-  constructor (type, { parent, data, envReplace }) {
+  constructor (where, { parent, data }) {
     super()
 
+    if (!hasOwn(LocationOptions, where)) {
+      throw new Error(`Cannot create ConfigData with invalid location: ${where}`)
+    }
+
     this.#parent = parent
-
-    const { where, description = where, ...opts } = typeof type === 'string'
-      ? { where: type } : type
-
     this.#where = where
+
+    const { description, ...opts } = LocationOptions[where]
     this.#description = description
-    this.#type = opts
-    this.#envReplace = envReplace
+    this.#opts = opts
 
     for (const key of Object.keys(SYMBOLS)) {
       this[key] = () => {
@@ -96,7 +99,7 @@ class ConfigData extends Map {
   #set (key, value) {
     // XXX(npm9+) make this throw an error
     const dep = definitions[key]?.deprecated
-    if (!this.#type.allowDeprecated && dep) {
+    if (!this.#opts.allowDeprecated && dep) {
       log.warn('config', key, dep)
     }
     Object.defineProperty(this.#data, key, {
@@ -163,7 +166,9 @@ class ConfigData extends Map {
     this.#assertLoaded()
     // then do any env specific replacements
     const parsed = Object.entries(data).reduce((acc, [k, v]) => {
-      acc[this.#envReplace(k)] = typeof v === 'string' ? this.#envReplace(v) : v
+      acc[envReplace(process.env, k)] = typeof v === 'string'
+        ? envReplace(process.env, v)
+        : v
       return acc
     }, {})
 
@@ -178,22 +183,22 @@ class ConfigData extends Map {
   }
 
   #clean (d) {
-    // console.log(typeDefs, types, types[this.where])
     nopt.clean(d, {
       typeDefs,
       types: types[this.where],
       invalidHandler: (...args) => this.#invalidHandler(...args),
     })
+    // invalid keys are deleted from this object
     return d
   }
 
   #invalidHandler (key, val) {
     this.#valid = false
-    const def = definitions[key]
+    const def = definitions[key] || internals[key]
     const msg = def
       ? `invalid item \`${key}\`, ${def.invalidUsage()} and got \`${val}\``
       : `unknown item \`${key}\`, with value \`${val}\``
-    if (this.#type.throw) {
+    if (this.#opts.throw) {
       throw new Error(msg)
     } else {
       log.warn('config', msg)
@@ -204,7 +209,7 @@ class ConfigData extends Map {
     data = data.trim().split('\n').join(EOL) + EOL
     await fs.mkdir(dirname(this.file), { recursive: true })
     await fs.writeFile(this.file, data, 'utf8')
-    await fs.chmod(this.file, this.#type.mode || 0o666)
+    await fs.chmod(this.file, this.#opts.mode || 0o666)
   }
 
   async save (newFile) {
@@ -285,7 +290,7 @@ class ConfigData extends Map {
 
     this.#clean(this.data)
 
-    if (this.#type.validateAuth) {
+    if (this.#opts.validateAuth) {
       const problems = []
       // after validating everything else, we look for old auth configs we no longer support
       // if these keys are found, we build up a list of them and the appropriate action and
@@ -322,7 +327,7 @@ class ConfigData extends Map {
         return {
           problems: {
             auth: problems.map((p) => {
-              p.where = this.#type.where
+              p.where = this.#where
               return p
             }),
           },
