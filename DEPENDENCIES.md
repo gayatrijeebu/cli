@@ -644,6 +644,7 @@ graph LR;
   npmcli-arborist-->tcompare;
   npmcli-arborist-->treeverse;
   npmcli-arborist-->walk-up-path;
+  npmcli-config-->acorn;
   npmcli-config-->ci-info;
   npmcli-config-->ini;
   npmcli-config-->isaacs-string-locale-compare["@isaacs/string-locale-compare"];

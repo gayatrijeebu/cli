@@ -5,11 +5,6 @@ const { resolve } = require('path')
 const { readFileSync } = require('fs')
 const { networkInterfaces } = require('os')
 
-// This is set by the config constructor and allows the types
-// to get the internal data from config for use in replacements
-let getData = () => {}
-const setDataFn = (fn) => getData = fn
-
 const typeSymbols = {}
 const typeDefs = {}
 const Types = {}
@@ -45,16 +40,15 @@ const valuesType = (values) => {
     values,
     validate: (data, k, val) => {
       if (allNumeric) {
-        const numVal = noptDefs.Number.validate(data, k, val)
-        if (values.includes(numVal)) {
-          data[k] = numVal
-          return
+        if (noptDefs.Number.validate(data, k, val) === false) {
+          return false
         }
-        return false
+        return !!values.includes(data[k])
       }
 
       if (values.includes(val)) {
         data[k] = val
+        return
       }
 
       return false
@@ -85,46 +79,41 @@ const validateUmask = (data, k, val) => {
   data[k] = val
 }
 
-const parsePath = (val) => {
+const parsePath = (val, { home, platform }) => {
   if (typeof val !== 'string') {
-    return false
+    return null
   }
 
-  const isWin = getData('platform') === 'win32'
+  const isWin = platform === 'win32'
   const homePattern = isWin ? /^~(\/|\\)/ : /^~\//
-  const home = getData('home')
 
   return home && val.match(homePattern)
     ? resolve(home, val.slice(2))
     : resolve(val)
 }
 
-// Override nopt path validaton to use the HOME and PLATFORM
-// values set by @npmcli/config constructor
-const validatePath = (data, k, val) => {
-  const pathVal = parsePath(val)
-  if (pathVal === false) {
-    return false
-  }
-
-  data[k] = pathVal
-}
-
-const validateFile = (data, k, val) => {
-  const pathVal = parsePath(val)
-  if (pathVal === false) {
-    return false
+const parseFile = (val) => {
+  if (typeof val !== 'string') {
+    return null
   }
 
   try {
-    data[k] = readFileSync(pathVal, 'utf8')
-    return
+    return readFileSync(val, 'utf8')
   } catch (er) {
     if (er.code !== 'ENOENT') {
       throw er
     }
   }
-  return false
+
+  return null
+}
+
+const validatePath = (data, k, val) => {
+  if (typeof val !== 'string') {
+    return false
+  }
+
+  data[k] = val
 }
 
 function validatePositiveNumber (data, k, val) {
@@ -147,7 +136,11 @@ const validateCsv = (data, k, val) => {
 }
 
 const validateScope = (data, k, val) => {
-  data[k] = !/^@/.test(val) ? `@${val}` : val
+  if (typeof val !== 'string' && val !== null) {
+    return false
+  }
+
+  data[k] = val ? !/^@/.test(val) ? `@${val}` : val : ''
 }
 
 const getLocalIps = () => {
@@ -212,7 +205,7 @@ type('Date', {
 })
 
 type('URL', {
-  validate: noptDefs.path.validate,
+  validate: noptDefs.url.validate,
   typeDescription: 'URL',
   description: 'a full url with "http://"',
 })
@@ -257,12 +250,16 @@ type('Path', {
   validate: validatePath,
   typeDescription: 'Path',
   description: 'a valid filesystem path',
+  depends: ['home', 'platform'],
+  value: parsePath,
 })
 
 type('File', {
-  validate: validateFile,
+  validate: validatePath,
   typeDescription: 'File',
   description: 'a valid filesystem path to be read as utf-8',
+  depends: ['home', 'platform'],
+  value: [parsePath, parseFile],
 })
 
 type('SemVer', {
@@ -332,5 +329,4 @@ module.exports = {
   typeDefs,
   Types,
   getType: getTypeBySymbol,
-  getData: setDataFn,
 }

@@ -7,60 +7,91 @@
 // version resolution" etc.
 
 const { Types, getType } = require('../type-defs')
-const { Locations } = require('./locations')
-
-const hasOwn = (o, k) => Object.prototype.hasOwnProperty.call(o, k)
-
-const identity = v => v
+const { Locations, LocationNames } = require('./locations')
 
 class Definition {
   // special affordance for ssl -> SSL and tty -> TTY
   static getFlatKey = (k) => k.replace(/-(ssl|tty|[a-z])/g, (...a) => a[1].toUpperCase())
 
-  static required = ['default', 'description', 'type']
+  static required = [
+    'default',
+    'description',
+    'type',
+  ]
+
   static allowed = [
     ...Definition.required,
     'alias',
     'defaultDescription',
     'deprecated',
+    'deprecatedKey',
     'depends',
     'derived',
     'envExport',
     'exclusive',
     'flatten',
     'hint',
+    'internal',
+    'key',
     'location',
     'setEnv',
     'setProcess',
     'short',
     'usage',
+    'value',
   ]
 
   #key = null
   #def = null
+  #displayKey = null
 
   #shortKeys = []
   #aliasKeys = []
   #shorthands = []
 
-  #getValue = identity
-  #flattenTo = new Set()
+  #getValue = []
+  #flatten = []
+  #dependencies = null
+  #depends = []
+  #location = []
 
   #envKeys = []
   #envEntries = []
   #processKeys = []
   #processEntries = []
 
-  constructor (key, def) {
-    this.#key = key
+  constructor (k, def) {
     this.#def = def
+    this.#displayKey = k
+    this.#key = this.#def.key ?? this.#displayKey
 
-    for (const f of [].concat(def.flatten ?? [])) {
-      this.#addFlat(f)
+    if (this.#def.derived) {
+      this.#location = [null]
+      this.#flatten = [this.#key]
+      this.#def.description = null
+    } else if (this.#def.internal) {
+      this.#location = [Locations.internal]
+      this.#def.description = null
+    } else {
+      for (const v of toArray(this.#def.flatten)) {
+        this.#flatten.push(v === true ? this.#key : v)
+      }
+      for (const v of toArray(this.#def.location)) {
+        this.#location.push(v)
+      }
+      if (this.#location.length) {
+        this.#location.push(Locations.builtin, Locations.default)
+      } else {
+        this.#location = [...LocationNames]
+      }
     }
 
-    if (!this.#flattenTo.size) {
-      console.log(key)
+    if (typeof this.#def.value === 'function') {
+      this.#getValue.push(this.#def.value)
+    } else {
+      if (this.#def.derived) {
+        throw new Error('derived defintions must have a value function')
+      }
     }
 
     if (!Array.isArray(this.#def.type)) {
@@ -75,6 +106,31 @@ class Definition {
     // always add null to types if its the default
     if (this.#def.default === null && !this.#def.type.includes(null)) {
       this.#def.type.unshift(null)
+    }
+
+    for (const typeDef of this.#typeDefs) {
+      if (typeDef === undefined) {
+        throw new Error(`type cannot contain \`undefined\`. `
+        + `This is probably a mistake from using an incorrect key from Types.*`)
+      }
+      if (typeDef?.depend) {
+        this.#depends = this.#depends.concat(typeDef.depend)
+      }
+      if (typeDef?.value) {
+        this.#getValue.unshift(...toArray(typeDef.value))
+      }
+    }
+
+    for (const v of toArray(this.#def.depends)) {
+      this.#depends.push(v)
+    }
+    if (hasOwn(this.#def, 'deprecatedKey')) {
+      const depKey = this.#def.deprecatedKey
+      this.#depends.push(depKey)
+      this.#getValue.unshift((val, obj) => {
+        const depValue = obj[Definition.getFlatKey(depKey)]
+        return depValue !== this.#def.default ? depValue : val
+      })
     }
 
     if (this.#def.setEnv) {
@@ -133,6 +189,14 @@ class Definition {
     }
   }
 
+  get key () {
+    return this.#key
+  }
+
+  get displayKey () {
+    return this.#displayKey
+  }
+
   get default () {
     return this.#def.default
   }
@@ -170,16 +234,24 @@ class Definition {
     return this.#def.type
   }
 
-  get flattenTo () {
-    return [...this.#flattenTo]
+  get flatten () {
+    return this.#flatten
   }
 
-  get getValue () {
-    return this.#getValue
-  }
-
-  get dependsOn () {
+  get depends () {
     return this.#def.depends ?? []
+  }
+
+  get dependencies () {
+    return this.#dependencies
+  }
+
+  get isDerived () {
+    return !!this.#def.derived
+  }
+
+  get isInternal () {
+    return !!this.#def.internal
   }
 
   get envKeys () {
@@ -196,10 +268,6 @@ class Definition {
 
   get setProcess () {
     return this.#processEntries
-  }
-
-  get location () {
-    return [].concat(this.#def.location ?? [])
   }
 
   get exclusive () {
@@ -248,22 +316,24 @@ class Definition {
     this.#shorthands.push([key, shorthand])
   }
 
-  #addFlat (f) {
-    const isFunc = typeof f === 'function'
-    const key = f === true || isFunc ? this.#key : f
-    this.#flattenTo.add(Definition.getFlatKey(key))
-    if (isFunc) {
-      this.#getValue = f
+  getValue (value, obj) {
+    if (!this.#getValue.length) {
+      return value
     }
+    if (this.isDerived) {
+      return this.#getValue[0](value)
+    }
+    return this.#getValue.reduce((a, fn) => fn(a, obj), value)
+  }
+
+  setDependencies (deps) {
+    this.#dependencies = deps
   }
 
   isAllowed (where) {
-    // a type is allowed for each location if the definition didnt specify any
-    // locations, or if the location is default or if this is one of the definitions
-    // valid locations
-    return !this.location.length ||
-      this.location.includes(where) ||
-      [Locations.default, Locations.builtin].includes(where)
+    // if a location is specified, then it is only allowed there
+    // otherwise it is allowed anywhere
+    return this.#location.includes(where)
   }
 
   // a textual description of this config, suitable for help output
@@ -291,9 +361,7 @@ class Definition {
   invalidUsage () {
     const allowMultiple = this.#typeMultiple
     const types = this.type.includes(Types.URL) ? [Types.URL]
-      // no actual configs matching this, but path types SHOULD be handled
-      // this way, like URLs, for the same reason
-      : /* istanbul ignore next */ this.type.includes(Types.Path) ? [Types.Path]
+      : this.type.includes(Types.Path) ? [Types.Path]
       : this.type
 
     const mustBe = types.filter(t => t !== Types.Array && t !== null).flatMap((t) => {
@@ -369,6 +437,12 @@ class Definition {
     return `${words}${multiple}`
   }
 }
+
+const hasOwn = (o, k) => Object.prototype.hasOwnProperty.call(o, k)
+
+const toArray = (v) => [].concat(v ?? [])
+
+const identity = v => v
 
 // if it's a string, quote it.  otherwise, just cast to string.
 const describeValue = val => Array.isArray(val)

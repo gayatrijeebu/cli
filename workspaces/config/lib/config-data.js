@@ -5,57 +5,79 @@ const spawn = require('@npmcli/promise-spawn')
 const fs = require('fs/promises')
 const { dirname } = require('path')
 const nerfDart = require('./nerf-dart')
-const { typeDefs } = require('./definitions/type-defs')
+const { typeDefs, Types } = require('./type-defs')
 const { Locations, LocationOptions } = require('./definitions/locations')
-const { definitions, internals, shorthands, types } = require('./definitions')
+const { definitions, internals, shorthands, types, changeKeys } = require('./definitions')
 const tmpFile = require('./tmp-file')
-const { envReplace } = require('./set-envs')
+const { replaceEnv } = require('./set-envs')
 const { EOL } = require('os')
 
 const hasOwn = (o, k) => Object.prototype.hasOwnProperty.call(o, k)
+
+const isNerfed = (s) => /^\/\//.test(s)
+const isScopedRegistry = (s) => /^@[^:/]+:registry$/.test(s)
 
 const SYMBOLS = {
   set: Symbol('set'),
   delete: Symbol('delete'),
   clear: Symbol('clear'),
+  load: Symbol('load'),
 }
 
 class ConfigData extends Map {
   static mutateSymbols = SYMBOLS
 
-  #parent = null
+  #getData = null
   #where = null
   #description = null
   #opts = null
 
+  #noptOpts = null
+
   #data = {}
+  #flatData = new Map()
+
   #file = null
   #source = null
   #valid = true
   #error = null
 
-  constructor (where, { parent, data }) {
+  constructor (where, { getData, data: initialData } = {}) {
     super()
 
     if (!hasOwn(LocationOptions, where)) {
       throw new Error(`Cannot create ConfigData with invalid location: ${where}`)
     }
 
-    this.#parent = parent
+    this.#getData = getData
     this.#where = where
 
     const { description, ...opts } = LocationOptions[where]
     this.#description = description
-    this.#opts = opts
+    this.#opts = {
+      allowDeprecated: opts.allowDeprecated ?? false,
+      throw: opts.throw ?? false,
+      mode: opts.mode ?? 0o666,
+      validateAuth: opts.validateAuth ?? false,
+      removeUnknown: opts.removeUnknown ?? true,
+    }
+
+    this.#noptOpts = {
+      typeDefs,
+      shorthands,
+      types: types[this.#where],
+      typeDefault: this.#opts.removeUnknown ? Types.NotAllowed : undefined,
+      invalidHandler: (...args) => this.#invalidHandler(...args),
+    }
 
     for (const key of Object.keys(SYMBOLS)) {
       this[key] = () => {
-        throw new Error(`Cannot call \`${key}\` directly on ConfigData:${this.where}`)
+        throw new Error(`Cannot call \`${key}\` directly on ConfigData:${this.#where}`)
       }
     }
 
-    if (data) {
-      this.load(data)
+    if (initialData) {
+      this.#load(initialData)
     }
   }
 
@@ -71,29 +93,51 @@ class ConfigData extends Map {
     return this.#data
   }
 
+  get flatData () {
+    return this.#flatData
+  }
+
   get source () {
     return this.#source
   }
 
   toString () {
-    return ini.stringify(this.data).trim()
+    return ini.stringify(this.#data).trim()
   }
 
   #assertLoaded (val = true) {
     if (!!this.#source !== val) {
-      throw new Error(`config data ${this.where} ${val ? 'must' : 'must not'} ` +
+      throw new Error(`config data ${this.#where} ${val ? 'must' : 'must not'} ` +
         `be loaded to perform this action`)
     }
   }
 
   [SYMBOLS.set] (key, value) {
     this.#valid = false
-    return this.#set(key, value)
+    const res = this.#set(key, value)
+    const d = { [key]: this.#data.value }
+    this.#clean(d)
+    if (!hasOwn(d, key)) {
+      this.#delete(key)
+    }
+    return res
   }
 
   [SYMBOLS.delete] (key) {
     this.#valid = false
     return this.#delete(key)
+  }
+
+  [SYMBOLS.clear] () {
+    throw new Error('not implemented')
+  }
+
+  [SYMBOLS.load] (...a) {
+    return this.#load(...a)
+  }
+
+  get (key) {
+    return super.get(changeKeys[key] ?? key)
   }
 
   #set (key, value) {
@@ -102,73 +146,76 @@ class ConfigData extends Map {
     if (!this.#opts.allowDeprecated && dep) {
       log.warn('config', key, dep)
     }
-    Object.defineProperty(this.#data, key, {
-      configurable: true,
-      enumerable: true,
-      get () {
-        return value
-      },
-    })
-    return super.set(key, value)
+
+    const internalKey = changeKeys[key] ?? key
+    if (this.#flatData.has(internalKey)) {
+      this.#flatData.set(internalKey, value)
+    } else {
+      Object.defineProperty(this.#data, internalKey, {
+        configurable: true,
+        enumerable: true,
+        get () {
+          return this.get(key)
+        },
+      })
+    }
+
+    return super.set(internalKey, value)
   }
 
   #delete (key) {
     delete this.#data[key]
+    this.#flatData.delete(key)
     return super.delete(key)
   }
 
   ignore (reason) {
     this.#assertLoaded(false)
-    this.#source = `${this.description}, ignored: ${reason}`
+    this.#source = `${this.#description}, ignored: ${reason}`
   }
 
-  load (data, error, file) {
+  #load (data, file, error) {
     this.#assertLoaded(false)
 
     this.#file = file
-    this.#source = this.description + (file ? `, file: ${file}` : '')
+    this.#source = this.#description + (file ? `, file: ${file}` : '')
 
     if (error) {
       if (error.code !== 'ENOENT') {
-        log.verbose('config', `error loading ${this.where} config`, error)
+        log.verbose('config', `error loading ${this.#where} config`, error)
       }
       this.#error = error
       return
     }
 
     if (!data) {
-      throw new Error(`Cannot load config location without data: ${this.where}`)
+      throw new Error(`Cannot load config location without data: ${this.#where}`)
     }
 
     // an array comes from argv so we parse it in the standard nopt way
     if (Array.isArray(data)) {
-      return this.loadArray(data)
+      return this.#loadArray(data)
     }
 
     // if its a string then it came from a file and we need to parse it with ini
     // first
-    return this.loadObject(typeof data === 'string' ? ini.parse(data) : data)
+    return this.#loadObject(typeof data === 'string' ? ini.parse(data) : data)
   }
 
-  loadArray (data) {
+  #loadArray (data) {
     this.#assertLoaded()
-    const { argv, ...parsedData } = nopt.nopt(data, {
-      typeDefs,
-      shorthands,
-      types: types[this.where],
-      invalidHandler: (...args) => this.#invalidHandler(...args),
-    })
+    const { argv, ...parsedData } = nopt.nopt(data, this.#noptOpts)
     this.#setAll(parsedData)
     return { argv, ...parsedData }
   }
 
-  loadObject (data) {
+  #loadObject (data) {
     this.#assertLoaded()
+
     // then do any env specific replacements
     const parsed = Object.entries(data).reduce((acc, [k, v]) => {
-      acc[envReplace(process.env, k)] = typeof v === 'string'
-        ? envReplace(process.env, v)
-        : v
+      const key = replaceEnv(process.env, k)
+      acc[key] = typeof v === 'string' ? replaceEnv(process.env, v) : v
       return acc
     }, {})
 
@@ -183,21 +230,38 @@ class ConfigData extends Map {
   }
 
   #clean (d) {
-    nopt.clean(d, {
-      typeDefs,
-      types: types[this.where],
-      invalidHandler: (...args) => this.#invalidHandler(...args),
-    })
     // invalid keys are deleted from this object
+    nopt.clean(d, this.#noptOpts)
     return d
   }
 
-  #invalidHandler (key, val) {
-    this.#valid = false
+  #invalidHandler (key, val, type, data) {
     const def = definitions[key] || internals[key]
-    const msg = def
-      ? `invalid item \`${key}\`, ${def.invalidUsage()} and got \`${val}\``
-      : `unknown item \`${key}\`, with value \`${val}\``
+
+    // TODO: move nerfdart auth stuff into a nested object that
+    // is only passed along to paths that end up calling npm-registry-fetch.
+    if (!def && isNerfed(key) || isScopedRegistry(key)) {
+      // add back nerf darts and scoped registries to the data object
+      // these are dynamic keys that will trigger the invalid handler
+      // they have never been validated before but if we want to start'
+      // wwe can do any additional checks here
+      data[key] = val
+      this.#flatData.set(key, val)
+      return
+    }
+
+    this.#valid = false
+
+    let msg = `${def ? 'invalid' : 'unknown'} item \`${key}\` set with \`${val}\`, `
+
+    if (def) {
+      msg += type === Types.NotAllowed
+        ? `not allowed to be set on config layer \`${this.#where}\``
+        : def.invalidUsage()
+    } else {
+      msg += `not allowed to be set`
+    }
+
     if (this.#opts.throw) {
       throw new Error(msg)
     } else {
@@ -209,15 +273,15 @@ class ConfigData extends Map {
     data = data.trim().split('\n').join(EOL) + EOL
     await fs.mkdir(dirname(this.file), { recursive: true })
     await fs.writeFile(this.file, data, 'utf8')
-    await fs.chmod(this.file, this.#opts.mode || 0o666)
+    await fs.chmod(this.file, this.#opts.mode)
   }
 
   async save (newFile) {
     this.#assertLoaded()
 
-    if (!this.file) {
+    if (!this.#file) {
       throw new Error(`Cannot save config since it was not loaded from a file: ` +
-        `\`${this.where}\` from \`${this.#description}\``)
+        `\`${this.#where}\` from \`${this.#description}\``)
     }
 
     if (this.#error) {
@@ -231,7 +295,7 @@ class ConfigData extends Map {
       this.#file = newFile
     }
 
-    if (this.where === Locations.user) {
+    if (this.#where === Locations.user) {
       // if email is nerfed, then we want to de-nerf it
       const nerfed = nerfDart(this.get('registry'))
       const email = this.get(`${nerfed}:email`)
@@ -244,7 +308,7 @@ class ConfigData extends Map {
     const data = this.toString()
     if (!data) {
       // ignore the unlink error (eg, if file doesn't exist)
-      await fs.unlink(this.file).catch(() => {})
+      await fs.unlink(this.#file).catch(() => {})
       return
     }
 
@@ -254,15 +318,15 @@ class ConfigData extends Map {
   async edit ({ editor }) {
     this.#assertLoaded()
 
-    if (!this.file) {
+    if (!this.#file) {
       throw new Error(`Cannot edit config since it was not loaded from a file: ` +
-        `\`${this.where}\` from \`${this.#description}\``)
+        `\`${this.#where}\` from \`${this.#description}\``)
     }
 
     if (this.#error) {
       // Dont save a file that had an error while loading
       throw new Error(`Cannot edit config that had an error while loading: ` +
-        `\`${this.where}\` loaded with error: \`${this.#error}\``)
+        `\`${this.#where}\` loaded with error: \`${this.#error}\``)
     }
 
     // save first, just to make sure it's synced up
@@ -271,11 +335,11 @@ class ConfigData extends Map {
 
     // then get the temporary file data, write it and open an editor
     // for the user to edit it
-    const data = await tmpFile({ file: this.file, where: this.where })
+    const data = await tmpFile({ file: this.#file, where: this.#where })
     await this.#writeFile(data)
     const [bin, ...args] = editor.split(/\s+/)
     try {
-      await spawn(bin, [...args, this.file], { stdio: 'inherit' })
+      await spawn(bin, [...args, this.#file], { stdio: 'inherit' })
     } catch (er) {
       throw new Error(`editor process exited with code: ${er.code}`)
     }
@@ -288,7 +352,7 @@ class ConfigData extends Map {
       return true
     }
 
-    this.#clean(this.data)
+    this.#clean(this.#data)
 
     if (this.#opts.validateAuth) {
       const problems = []
@@ -303,11 +367,6 @@ class ConfigData extends Map {
         }
       }
 
-      // NOTE we pull registry without restricting to the current 'where' because we want to
-      // suggest scoping things to the registry they would be applied to, which is the default
-      // regardless of where it was defined
-      const nerfedReg = nerfDart(this.#parent.getData('registry'))
-
       // keys that should be nerfed but currently are not
       for (const key of ['_auth', '_authToken', 'username', '_password']) {
         if (this.get(key)) {
@@ -317,6 +376,10 @@ class ConfigData extends Map {
           } else if (key === '_password' && !this.get('username')) {
             problems.push({ action: 'delete', key })
           } else {
+            // NOTE we pull registry without restricting to the current 'where' because we want to
+            // suggest scoping things to the registry they would be applied to, which is the default
+            // regardless of where it was defined
+            const nerfedReg = nerfDart(this.#getData('registry'))
             problems.push({ action: 'rename', from: key, to: `${nerfedReg}:${key}` })
           }
         }

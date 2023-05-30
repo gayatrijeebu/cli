@@ -249,7 +249,6 @@ class Config {
     // command name, the remaining args, and config values from the CLI and can rewrite
     // them or parse the remaining config files with this information.
     const { argv: { remain, cooked } } = this.#loadObject(Locations.cli, this.#argv.slice(2))
-    this.#configData.get(Locations.cli).loadObject({ ...Definitions.internal })
 
     let command = remain[0]
     let positionals = remain.slice(1)
@@ -303,11 +302,6 @@ class Config {
         nonDashArgs.join(', ')
       )
     }
-  }
-
-  async add (where, data) {
-    this.#assertLoaded()
-    return this.#configData.add(where, data)
   }
 
   async load () {
@@ -396,13 +390,12 @@ class Config {
   }
 
   #loadObject (where, data, file, error) {
-    return this.#configData.get(where).load(data, error, file)
+    return this.#configData.load(where, data, file, error)
   }
 
   async #findGlobalPrefix () {
     await this.#time('whichnode', async () => {
       const node = await which(this.#argv[0]).catch(() => {})
-      console.log(node)
       if (node?.toUpperCase() !== this.#getInternal('exec-path').toUpperCase()) {
         log.verbose('config', 'node symlink', node)
         this.#setInternal('exec-path', node)

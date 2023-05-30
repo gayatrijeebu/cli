@@ -1,74 +1,62 @@
 const ConfigData = require('./config-data')
 const { getFlatKey } = require('./definitions/definition')
-const { LocationNames } = require('./definitions/locations')
+const { LocationNames, Locations } = require('./definitions/locations')
 const {
   definitions,
-  definitionKeys,
   derived,
-  derivedKeys,
   internals,
-  internalKeys,
+  sortedKeys,
+  defaults,
+  internalDefaults,
 } = require('./definitions')
 
-// TODO: flatten based on key match
-// if (/@.*:registry$/i.test(key) || /^\/\//.test(key)) {
-//   flat[key] = val
-// }
-
 const hasOwn = (o, k) => Object.prototype.hasOwnProperty.call(o, k)
-
-const cacheDescriptor = ({ key, cache }, getValue) => ({
-  configurable: false,
-  enumerable: true,
-  get: () => {
-    if (!cache.has(key)) {
-      cache.set(key, getValue())
-    }
-    return cache.get(key)
-  },
-})
-
-const defineBaseAndFlat = (obj, key, descriptor) => {
-  Object.defineProperty(obj, key, descriptor)
-  const flatKey = getFlatKey(key)
-  if (key !== flatKey) {
-    Object.defineProperty(obj, flatKey, descriptor)
-  }
-}
 
 class ConfigLocations extends Map {
   #list = []
   #revList = []
   #indexes = {}
 
-  #data = {}
-  #baseData = {}
+  #flatData = {}
+  #dependsData = {}
 
-  #base = new Map()
-  #derived = new Map()
+  #cache = new Map()
+
+  // #data = {}
+  // #rawData = {}
+  // #allData = {}
+  // #allFlatData = {}
 
   constructor () {
     super()
 
-    for (const key of internalKeys) {
-      this.#createInternalDescriptor(key)
-    }
-
-    for (const key of definitionKeys) {
-      this.#createBaseDescriptor(key)
-    }
-
-    for (const key of derivedKeys) {
-      this.#createDerivedDescriptor(key)
-    }
-
     for (const where of LocationNames) {
-      this.add(where)
+      let data
+      if (where === Locations.default) {
+        data = defaults
+      } else if (where === Locations.internal) {
+        data = internalDefaults
+      }
+      this.add(where, data)
+    }
+
+    for (const key of sortedKeys) {
+      const def = this.#getDef(key)
+      const getValue = this.#getValue(def)
+
+      this.#setFlatData(key, getValue, this.#dependsData)
+
+      for (const flatKey of def.flatten) {
+        this.#setFlatData(flatKey.split('.'), getValue)
+      }
     }
 
     // symbols for mutating config data are shared here so that no method is exposed
     // that can mutate a location's config data execpt for these
     for (const key of Object.keys(ConfigData.mutateSymbols)) {
+      if (key === 'load') {
+        continue
+      }
       this[key] = () => {
         throw new Error(`Cannot call ${key} on config locations`)
       }
@@ -76,7 +64,49 @@ class ConfigLocations extends Map {
   }
 
   get data () {
-    return this.#data
+    return this.#flatData
+  }
+
+  #getDef (key) {
+    return derived[key] ?? internals[key] ?? definitions[key]
+  }
+
+  #getValue (def) {
+    return () => {
+      if (this.#cache.has(def)) {
+        return this.#cache.get(def)
+      }
+      const result = def.isDerived
+        ? def.getValue(this.#dependsData)
+        : def.getValue(this.getData(null, def.key), this.#dependsData)
+      this.#cache.set(def, result)
+      return result
+    }
+  }
+
+  #setFlatData (keys, getValue, obj = this.#flatData) {
+    if (keys.length === 1 || typeof keys === 'string') {
+      const key = Array.isArray(keys) ? keys[0] : keys
+      Object.defineProperty(obj, getFlatKey(key), {
+        configurable: false,
+        enumerable: true,
+        get: getValue,
+      })
+    } else {
+      const next = getFlatKey(keys.shift())
+      if (!hasOwn(obj, next)) {
+        Object.defineProperty(obj, next, {
+          configurable: false,
+          enumerable: true,
+          value: {},
+        })
+      }
+      this.#setFlatData(keys, getValue, obj[next])
+    }
+  }
+
+  load (where, ...args) {
+    return this.get(where)[ConfigData.mutateSymbols.load](...args)
   }
 
   get (where) {
@@ -88,7 +118,7 @@ class ConfigLocations extends Map {
 
   add (location, configData) {
     const data = new ConfigData(location, {
-      parent: this,
+      getData: (k) => this.getData(null, k),
       data: configData,
     })
 
@@ -96,25 +126,12 @@ class ConfigLocations extends Map {
     this.#revList.unshift(data.where)
     super.set(data.where, data)
 
+    // TODO: for later, figure out how to invalidate and cache these
+    for (const [k, v] of data.flatData.entries()) {
+      this.#setFlatData([k], () => v)
+    }
+
     return data
-  }
-
-  // defaults -> cli
-  * values (startWhere) {
-    const index = startWhere ? this.#indexes[startWhere] : 0
-    const locations = index ? this.#list.slice(index) : this.#list
-    for (const where of locations) {
-      yield this.get(where)
-    }
-  }
-
-  // cli -> defaults
-  * #reverseValues (startWhere) {
-    const index = startWhere ? this.#revList.length - 1 - this.#indexes[startWhere] : 0
-    const locations = index ? this.#revList.slice(index) : this.#revList
-    for (const where of locations) {
-      yield this.get(where)
-    }
   }
 
   find (where, key) {
@@ -128,33 +145,12 @@ class ConfigLocations extends Map {
 
   getData (where, key) {
     if (where === null) {
-      const [found, value] = this.#getDerivedData(key)
-      if (found) {
-        return value
-      }
-    }
-    return this.#getBaseData(where, key)
-  }
-
-  #getBaseData (where, key) {
-    if (where === null) {
       for (const config of this.#reverseValues()) {
         if (config.has(key)) {
           return config.get(key)
         }
       }
-      return
     }
-    return this.get(where).get(key)
-  }
-
-  #getDerivedData (k, data = this.#data) {
-    const key = getFlatKey(k)
-    const split = key.indexOf('.')
-    if (split !== -1) {
-      return this.#getDerivedData(key.slice(split + 1), data[key.slice(0, split)])
-    }
-    return hasOwn(data, key) ? [true, data[key]] : [false]
   }
 
   hasData (where, key) {
@@ -180,50 +176,28 @@ class ConfigLocations extends Map {
   }
 
   #mutateData (key) {
-    this.#base.delete(key)
-    this.#derived.delete(key)
-    const definition = definitions[key]
-    for (const s of definition?.derived || []) {
-      this.#derived.delete(s)
+    const def = this.#getDef(key)
+    for (const d of def.dependencies) {
+      this.#cache.delete(d)
     }
   }
 
-  // TODO: move nerfdart auth stuff into a nested object that
-  // is only passed along to paths that end up calling npm-registry-fetch.
-  #createBaseDescriptor (key, def, data = this.#baseData) {
-    defineBaseAndFlat(data, key, cacheDescriptor(
-      { key, cache: this.#base },
-      () => this.#getBaseData(null, key)
-    ))
-  }
-
-  #createInternalDescriptor (key) {
-    Object.defineProperty(this.#data, getFlatKey(key), {
-      configurable: false,
-      enumerable: true,
-      value: internals[key],
-    })
-  }
-
-  #createDerivedDescriptor (key, data = this.#data) {
-    const split = key.indexOf('.')
-    if (split !== -1) {
-      const [parentKey, childKey] = [key.slice(0, split), key.slice(split + 1)]
-      if (!hasOwn(data, parentKey)) {
-        defineBaseAndFlat(data, parentKey, {
-          configurable: false,
-          enumerable: true,
-          value: {},
-        })
-      }
-      return this.#createBaseDescriptor(childKey, data[parentKey])
+  // defaults -> internal
+  * values (startWhere) {
+    const index = startWhere ? this.#indexes[startWhere] : 0
+    const locations = index ? this.#list.slice(index) : this.#list
+    for (const where of locations) {
+      yield this.get(where)
     }
+  }
 
-    const derive = derived[key]
-    Object.defineProperty(data, derive.flatKey, cacheDescriptor(
-      { key, cache: this.#derived },
-      () => derive.get(this.#baseData)
-    ))
+  // internal -> defaults
+  * #reverseValues (startWhere) {
+    const index = startWhere ? this.#revList.length - 1 - this.#indexes[startWhere] : 0
+    const locations = index ? this.#revList.slice(index) : this.#revList
+    for (const where of locations) {
+      yield this.get(where)
+    }
   }
 }
 

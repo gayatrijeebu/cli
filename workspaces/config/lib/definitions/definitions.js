@@ -1,3 +1,9 @@
+/* eslint no-unused-vars: ["error", { "ignoreRestSiblings": false }] */
+// Error on unused rest params since those are required to match the
+// depends array for each definition
+
+/* global Boolean:off, Array:off, String:off, Number:off, Date:off */
+
 const ciInfo = require('ci-info')
 const { homedir } = require('os')
 const { resolve, join } = require('path')
@@ -31,7 +37,9 @@ const Unicode = /UTF-?8$/i.test(LC_ALL || LC_CTYPE || LANG)
 const CacheRoot = `${(IsWindows && LOCALAPPDATA) || '~'}/${IsWindows ? 'npm-cache' : '.npm'}`
 const CiName = ciInfo.name?.toLowerCase().split(' ').join('-') ?? null
 
-const E = module.exports = {
+module.exports = {
+  displayKeys: [],
+  changeKeys: {},
   definitions: {},
   definitionKeys: [],
   internals: {},
@@ -40,27 +48,46 @@ const E = module.exports = {
   derivedKeys: [],
 }
 
-const define = (key, v) => {
-  E.definitions[key] = new Definition(key, v)
-  E.definitionKeys.push(key)
+const define = (key, { deprecatedKey, ...v }) => {
+  const d = new Definition(key, v)
+  module.exports.definitions[d.key] = d
+  module.exports.definitionKeys.push(d.key)
+  module.exports.displayKeys.push(d.displayKey)
+  if (d.displayKey !== d.key) {
+    module.exports.changeKeys[d.displayKey] = d.key
+  }
+
+  if (deprecatedKey) {
+    define(deprecatedKey, {
+      ...v,
+      depends: null,
+      setEnv: null,
+      setProcess: null,
+      flatten: null,
+      value: null,
+      deprecated: `Use \`--${key}\` instead.`,
+      description: `Alias for \`--${key}\``,
+    })
+  }
 }
 
 const internal = (key, v) => {
-  E.internals[key] = new Definition(key, {
+  const d = new Definition(key, {
     ...v,
-    description: null,
-    location: [Locations.internal],
+    internal: true,
   })
-  E.internalKeys.push(key)
+  module.exports.internals[d.key] = d
+  module.exports.internalKeys.push(d.key)
 }
 
 const derive = (key, v) => {
-  E.derived[key] = new Definition(key, {
+  const d = new Definition(key, {
     ...v,
-    description: null,
     derived: true,
+    type: null,
   })
-  E.derivedKeys.push(key)
+  module.exports.derived[d.key] = d
+  module.exports.derivedKeys.push(d.key)
 }
 
 /*
@@ -106,6 +133,7 @@ internal('home', {
 internal('hash-algorithm', {
   default: 'sha1',
   type: Types.String,
+  flatten: true,
 })
 
 internal('node-version', {
@@ -116,6 +144,7 @@ internal('node-version', {
 internal('npm-bin', {
   default: require.main?.filename ?? null,
   type: Types.String,
+  flatten: true,
   setEnv: {
     // XXX make this the bin/npm-cli.js file explicitly instead
     // otherwise using npm programmatically is a bit of a pain.
@@ -181,28 +210,32 @@ internal('title', {
  *
  */
 derive('cache', {
-  type: Types.Path,
   depends: ['cache-root'],
-  flatten: ({ cacheRoot }) => {
+  value: ({ cacheRoot }) => {
     return join(cacheRoot, '_cacache')
   },
 })
 
 derive('color', {
-  type: Types.Boolean,
   depends: ['color-raw'],
-  flatten: ({ colorRaw }) => {
-    return colorRaw === 'always' ? true : StdoutTTY
+  value: ({ colorRaw }) => {
+    return colorRaw === false ? false : colorRaw === 'always' ? true : StdoutTTY
   },
   setEnv: {
     COLOR: (color) => color ? '1' : '0',
   },
 })
 
+derive('global', {
+  depends: ['global-raw', 'location-raw'],
+  value: ({ globalRaw, locationRaw }) => {
+    return globalRaw ?? locationRaw === 'global'
+  },
+})
+
 derive('global-prefix', {
-  type: Types.Path,
   depends: ['prefix', 'default-global-prefix'],
-  flatten: ({ prefix, defaultGlobalPrefix }) => {
+  value: ({ prefix, defaultGlobalPrefix }) => {
     return prefix ?? defaultGlobalPrefix
   },
   setEnv: {
@@ -211,7 +244,6 @@ derive('global-prefix', {
 })
 
 derive('local-prefix', {
-  type: Types.Path,
   depends: [
     'prefix',
     'workspaces',
@@ -220,7 +252,7 @@ derive('local-prefix', {
     'default-local-prefix-workspace',
     'cwd',
   ],
-  flatten: ({
+  value: ({
     prefix,
     workspaces,
     global,
@@ -245,34 +277,37 @@ derive('local-prefix', {
   },
 })
 
+derive('location', {
+  depends: ['global-raw', 'location-raw'],
+  value: ({ globalRaw, locationRaw }) => {
+    return globalRaw ? 'global' : locationRaw
+  },
+})
+
 derive('log-color', {
-  type: Types.Boolean,
   depends: ['color-raw'],
-  flatten: ({ colorRaw }) => {
-    return colorRaw === 'always' ? true : StderrTTY
+  value: ({ colorRaw }) => {
+    return colorRaw === false ? false : colorRaw === 'always' ? true : StderrTTY
   },
 })
 
 derive('npx-cache', {
-  type: Types.Path,
   depends: ['cache-root'],
-  flatten: ({ cacheRoot }) => {
+  value: ({ cacheRoot }) => {
     return join(cacheRoot, '_npx')
   },
 })
 
 derive('node-bin', {
-  type: Types.String,
   depends: ['exec-path'],
-  flatten: ({ execPath }) => {
+  value: ({ execPath }) => {
     return NODE ?? execPath
   },
 })
 
 derive('save-type', {
-  type: Types.Boolean,
   depends: ['save-dev', 'save-optional', 'save-peer', 'save-prod'],
-  flatten: ({ saveDev, saveOptional, savePeer, saveProd }) => {
+  value: ({ saveDev, saveOptional, savePeer, saveProd }) => {
     if (savePeer && saveOptional) {
       return 'peerOptional'
     }
@@ -288,31 +323,34 @@ derive('save-type', {
     if (saveProd) {
       return 'prod'
     }
-    return null
   },
 })
 
 derive('silent', {
-  type: Types.Boolean,
   depends: ['loglevel'],
-  flatten: ({ loglevel }) => {
+  value: ({ loglevel }) => {
     return loglevel === 'silent'
   },
 })
 
 derive('tuf-cache', {
-  type: Types.Path,
   depends: ['cache-root'],
-  flatten: ({ cacheRoot }) => {
+  value: ({ cacheRoot }) => {
     return join(cacheRoot, '_tuf')
   },
 })
 
 derive('workspaces-enabled', {
-  type: Types.Boolean,
   depends: ['workspaces'],
-  flatten: ({ workspaces }) => {
+  value: ({ workspaces }) => {
     return workspaces !== false
+  },
+})
+
+derive('workspaces-set', {
+  depends: ['workspaces', 'workspace'],
+  value: ({ workspaces, workspace }) => {
+    return !!(workspaces || workspace.length)
   },
 })
 
@@ -414,7 +452,8 @@ define('auth-type', {
     Note that if an \`otp\` config is given, this value will always be set to \`legacy\`.
   `,
   depends: ['otp'],
-  flatten: (authType, { otp }) => {
+  flatten: true,
+  value: (authType, { otp }) => {
     return otp ? 'legacy' : authType
   },
 })
@@ -491,12 +530,14 @@ define('ca', {
     See also the \`strict-ssl\` config.
   `,
   depends: ['cafile'],
-  flatten: (ca, { cafile }) => {
+  flatten: true,
+  value: (ca, { cafile }) => {
     return (ca ?? []).concat(cafile ?? [])
   },
 })
 
 define('cache', {
+  key: 'cache-root',
   default: CacheRoot,
   defaultDescription: `
     Windows: \`%LocalAppData%\\npm-cache\`, Posix: \`~/.npm\`
@@ -505,7 +546,6 @@ define('cache', {
   description: `
     The location of npm's cache directory.
   `,
-  flatten: 'cache-root',
 })
 
 define('cache-max', {
@@ -537,7 +577,8 @@ define('cafile', {
     certificates. Similar to the \`ca\` setting, but allows for multiple
     CA's, as well as for the CA information to be stored in a file on disk.
   `,
-  flatten: (cafile) => {
+  flatten: true,
+  value: (cafile) => {
     const delim = '-----END CERTIFICATE-----'
     return cafile
       ?.replace(/\r\n/g, '\n')
@@ -548,7 +589,6 @@ define('cafile', {
 })
 
 define('call', {
-  default: '',
   type: Types.String,
   short: 'c',
   description: `
@@ -592,7 +632,7 @@ define('ci-name', {
     The name of the current CI system, or \`null\` when not on a known CI
     platform.
   `,
-  type: [null, Types.String],
+  type: Types.String,
   deprecated: `
     This config is deprecated and will not be changeable in future version of npm.
   `,
@@ -614,6 +654,7 @@ define('cidr', {
 })
 
 define('color', {
+  key: 'color-raw',
   default: !NO_COLOR || NO_COLOR === '0',
   defaultDescription: `
     true unless the NO_COLOR environ is set to something other than '0'
@@ -623,7 +664,6 @@ define('color', {
     If false, never shows colors.  If \`"always"\` then always shows colors.
     If true, then only prints color codes for tty file descriptors.
   `,
-  flatten: 'color-raw',
 })
 
 define('commit-hooks', {
@@ -648,7 +688,8 @@ define('depth', {
     by default.
   `,
   depends: ['all'],
-  flatten: (depth, { all }) => {
+  flatten: true,
+  value: (depth, { all }) => {
     return depth ?? all ? Infinity : 1
   },
 })
@@ -937,6 +978,7 @@ define('git-tag-version', {
 })
 
 define('global', {
+  key: 'global-raw',
   default: false,
   type: Types.Boolean,
   short: 'g',
@@ -954,10 +996,6 @@ define('global', {
     * bin files are linked to \`{prefix}/bin\`
     * man pages are linked to \`{prefix}/share/man\`
   `,
-  depends: ['location'],
-  flatten: (global, { location }) => {
-    return location === 'global' || global
-  },
 })
 
 define('globalconfig', {
@@ -970,12 +1008,14 @@ define('globalconfig', {
     The config file to read for global config options.
   `,
   depends: ['prefix', 'default-global-prefix'],
-  flatten: (globalconfig, { prefix, defaultGlobalPrefix }) => {
+  flatten: true,
+  value: (globalconfig, { prefix, defaultGlobalPrefix }) => {
+    const def = prefix ?? defaultGlobalPrefix
     // if the prefix is set on cli, env, or userconfig, then we need to
     // default the globalconfig file to that location, instead of the default
     // global prefix.  It's weird that `npm get globalconfig --prefix=/foo`
     // returns `/foo/etc/npmrc`, but better to not change it at this point.
-    return globalconfig ?? resolve(prefix ?? defaultGlobalPrefix, 'etc/npmrc')
+    return globalconfig ?? def != null ? resolve(def, 'etc/npmrc') : null
   },
 })
 
@@ -1054,7 +1094,8 @@ define('include', {
     command-line.
   `,
   depends: ['dev', 'production', 'optional', 'also'],
-  flatten: (include, { dev, production, optional, also }) => {
+  flatten: true,
+  value: (include, { dev, production, optional, also }) => {
     const derived = [...include]
 
     if (production === false) {
@@ -1104,29 +1145,32 @@ define('include-workspace-root', {
   flatten: true,
 })
 
+// these deprecated version of these keys with dots instead of dashes as
+// separators are historically supported in .npmrc files, unfortunately. They
+// should be removed in a future npm version.
 define('init-author-email', {
-  default: '',
   type: Types.String,
   description: `
     The value \`npm init\` should use by default for the package author's
     email.
   `,
+  deprecatedKey: 'init.author.email',
 })
 
 define('init-author-name', {
-  default: '',
   type: Types.String,
   description: `
     The value \`npm init\` should use by default for the package author's name.
   `,
+  deprecatedKey: 'init.author.name',
 })
 
 define('init-author-url', {
-  default: '',
   type: Types.URL,
   description: `
     The value \`npm init\` should use by default for the package author's homepage.
   `,
+  deprecatedKey: 'init.author.url',
 })
 
 define('init-license', {
@@ -1135,6 +1179,7 @@ define('init-license', {
   description: `
     The value \`npm init\` should use by default for the package license.
   `,
+  deprecatedKey: 'init.license',
 })
 
 define('init-module', {
@@ -1146,6 +1191,7 @@ define('init-module', {
     [init-package-json](https://github.com/npm/init-package-json) module for
     more information, or [npm init](/commands/npm-init).
   `,
+  deprecatedKey: 'init.module',
 })
 
 define('init-version', {
@@ -1155,73 +1201,7 @@ define('init-version', {
     The value that \`npm init\` should use by default for the package
     version number, if not already set in package.json.
   `,
-})
-
-// these "aliases" are historically supported in .npmrc files, unfortunately
-// They should be removed in a future npm version.
-define('init.author.email', {
-  default: '',
-  type: Types.String,
-  deprecated: `
-    Use \`--init-author-email\` instead.`,
-  description: `
-    Alias for \`--init-author-email\`
-  `,
-})
-
-define('init.author.name', {
-  default: '',
-  type: Types.String,
-  deprecated: `
-    Use \`--init-author-name\` instead.
-  `,
-  description: `
-    Alias for \`--init-author-name\`
-  `,
-})
-
-define('init.author.url', {
-  default: '',
-  type: Types.URL,
-  deprecated: `
-    Use \`--init-author-url\` instead.
-  `,
-  description: `
-    Alias for \`--init-author-url\`
-  `,
-})
-
-define('init.license', {
-  default: 'ISC',
-  type: Types.String,
-  deprecated: `
-    Use \`--init-license\` instead.
-  `,
-  description: `
-    Alias for \`--init-license\`
-  `,
-})
-
-define('init.module', {
-  default: '~/.npm-init.js',
-  type: Types.Path,
-  deprecated: `
-    Use \`--init-module\` instead.
-  `,
-  description: `
-    Alias for \`--init-module\`
-  `,
-})
-
-define('init.version', {
-  default: '1.0.0',
-  type: Types.SemVer,
-  deprecated: `
-    Use \`--init-version\` instead.
-  `,
-  description: `
-    Alias for \`--init-version\`
-  `,
+  deprecatedKey: 'init.version',
 })
 
 define('install-links', {
@@ -1247,8 +1227,9 @@ define('install-strategy', {
     linked: (experimental) install in node_modules/.store, link in place,
       unhoisted.
   `,
-  depends: ['global-style', 'legacy-bundling', 'install-strategy'],
-  flatten: (installStrategy, { globalStyle, legacyBundling }) => {
+  depends: ['global-style', 'legacy-bundling'],
+  flatten: true,
+  value: (installStrategy, { globalStyle, legacyBundling }) => {
     return globalStyle ? 'shallow' : legacyBundling ? 'nested' : installStrategy
   },
 })
@@ -1345,6 +1326,7 @@ define('local-address', {
 })
 
 define('location', {
+  key: 'location-raw',
   default: 'user',
   short: 'L',
   type: [
@@ -1367,10 +1349,6 @@ define('location', {
     * bin files are linked to \`{prefix}/bin\`
     * man pages are linked to \`{prefix}/share/man\`
   `,
-  depends: ['global'],
-  flatten: (location, { global }) => {
-    return global ? 'global' : location
-  },
 })
 
 define('lockfile-version', {
@@ -1444,7 +1422,8 @@ define('logs-dir', {
     logging\`](/using-npm/logging) for more information.
   `,
   depends: ['cache-root'],
-  flatten: (logsDir, { cacheRoot }) => {
+  flatten: true,
+  value: (logsDir, { cacheRoot }) => {
     return logsDir ?? join(cacheRoot, '_logs')
   },
 })
@@ -1505,7 +1484,6 @@ define('node-options', {
 })
 
 define('noproxy', {
-  default: '',
   defaultDescription: `
     The value of the NO_PROXY environment variable
   `,
@@ -1549,8 +1527,9 @@ define('omit', {
     environment variable will be set to \`'production'\` for all lifecycle
     scripts.
   `,
-  depends: ['dev', 'production', 'optional', 'also', 'include'],
-  flatten: (omit, { production, optional, only, include }) => {
+  depends: ['production', 'optional', 'only', 'include'],
+  flatten: true,
+  value: (omit, { production, optional, only, include }) => {
     const derived = [...omit]
 
     if (/^prod(uction)?$/.test(only) || production) {
@@ -1632,9 +1611,11 @@ define('package-lock', {
     This will also prevent _writing_ \`package-lock.json\` if \`save\` is
     true.
   `,
+  deprecatedKey: 'shrinkwrap',
   depends: ['package-lock-only'],
-  flatten: (packageLock, { packageLockOnly }) => {
-    return packageLock || packageLockOnly
+  flatten: true,
+  value: (packageLock, { shrinkwrap, packageLockOnly }) => {
+    return packageLock || shrinkwrap || packageLockOnly
   },
 })
 
@@ -1676,7 +1657,7 @@ define('parseable', {
 
 define('prefer-dedupe', {
   default: false,
-  type: Boolean,
+  type: Types.Boolean,
   description: `
     Prefer to deduplicate packages if possible, rather than
     choosing a newer version of a dependency.
@@ -1693,7 +1674,8 @@ define('prefer-offline', {
     \`--offline\`.
   `,
   depends: ['cache-min'],
-  flatten: (preferOffline, { cacheMin }) => {
+  flatten: true,
+  value: (preferOffline, { cacheMin }) => {
     return cacheMin >= 9999 ? true : preferOffline
   },
 })
@@ -1706,7 +1688,8 @@ define('prefer-online', {
     look for updates immediately even for fresh package data.
   `,
   depends: ['cache-max'],
-  flatten: (preferOnline, { cacheMax }) => {
+  flatten: true,
+  value: (preferOnline, { cacheMax }) => {
     return cacheMax <= 0 ? true : preferOnline
   },
 })
@@ -1724,13 +1707,13 @@ define('prefix', {
     it forces non-global commands to run in the specified folder.
   `,
   depends: ['default-global-prefix'],
-  flatten: (prefix, { defaultGlobalPrefix }) => {
+  flatten: true,
+  value: (prefix, { defaultGlobalPrefix }) => {
     return prefix ?? defaultGlobalPrefix
   },
 })
 
 define('preid', {
-  default: '',
   hint: 'prerelease-id',
   type: Types.String,
   description: `
@@ -1747,7 +1730,7 @@ define('production', {
 })
 
 define('progress', {
-  default: !(ciInfo.isCI || StderrTTY || TERM === 'dumb'),
+  default: !(ciInfo.isCI || !StderrTTY || TERM === 'dumb'),
   defaultDescription: `
     \`true\` unless running in a known CI system
   `,
@@ -1763,7 +1746,7 @@ define('progress', {
 
 define('provenance', {
   default: false,
-  type: Boolean,
+  type: Types.Boolean,
   exclusive: ['provenance-file'],
   description: `
     When publishing from a supported cloud CI/CD system, the package will be
@@ -1870,7 +1853,8 @@ define('save-bundle', {
     Ignored if \`--save-peer\` is set, since peerDependencies cannot be bundled.
   `,
   depends: ['save-peer'],
-  flatten: (saveBundle, { savePeer }) => {
+  flatten: true,
+  value: (saveBundle, { savePeer }) => {
     // XXX update arborist to just ignore it if resulting saveType is peer
     // otherwise this won't have the expected effect:
     //
@@ -1935,7 +1919,8 @@ define('save-prefix', {
     only allows patch upgrades.
   `,
   depends: ['save-exact'],
-  flatten: (savePrefix, { saveExact }) => {
+  flatten: true,
+  value: (savePrefix, { saveExact }) => {
     return saveExact ? '' : savePrefix
   },
 })
@@ -1956,7 +1941,6 @@ define('save-prod', {
 })
 
 define('scope', {
-  default: '',
   defaultDescription: `
     the scope of the current project, if any, or ""
   `,
@@ -2002,7 +1986,6 @@ define('script-shell', {
 })
 
 define('searchexclude', {
-  default: '',
   type: Types.LowercaseString,
   description: `
     Space-separated options that limit the results from search.
@@ -2021,7 +2004,6 @@ define('searchlimit', {
 })
 
 define('searchopts', {
-  default: '',
   type: Types.Querystring,
   description: `
     Space-separated options that are always passed to search.
@@ -2049,18 +2031,6 @@ define('shell', {
     The shell to run for the \`npm explore\` command.
   `,
   flatten: true,
-})
-
-define('shrinkwrap', {
-  default: true,
-  type: Types.Boolean,
-  deprecated: `
-    Use the --package-lock setting instead.
-  `,
-  description: `
-    Alias for --package-lock
-  `,
-  flatten: 'package-lock',
 })
 
 define('sign-git-commit', {
@@ -2241,17 +2211,16 @@ define('user-agent', {
   `,
   depends: [
     'ci-name',
-    'workspaces',
-    'workspace',
+    'workspaces-set',
     'npm-version',
     'node-version',
     'platform',
     'arch',
   ],
-  flatten: (userAgent, {
+  flatten: true,
+  value: (userAgent, {
     ciName,
-    workspaces,
-    workspace,
+    workspacesSet,
     npmVersion,
     nodeVersion,
     platform,
@@ -2262,8 +2231,9 @@ define('user-agent', {
       .replace(/\{npm-version\}/gi, npmVersion)
       .replace(/\{platform\}/gi, platform)
       .replace(/\{arch\}/gi, arch)
-      .replace(/\{workspaces\}/gi, !!(workspaces || workspace?.length))
+      .replace(/\{workspaces\}/gi, workspacesSet)
       .replace(/\{ci\}/gi, ciName ? `ci/${ciName}` : '')
+      .replace(/\s+/gi, ' ')
       .trim()
   },
   setEnv: {
@@ -2331,7 +2301,7 @@ define('which', {
 
 define('workspace', {
   default: [],
-  type: [Types.String, Types.Path, Types.Array],
+  type: [Types.String, Types.Array],
   hint: ['workspace-name', 'workspace-path'],
   short: 'w',
   envExport: false,
